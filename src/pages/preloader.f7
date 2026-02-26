@@ -1,0 +1,86 @@
+<template>
+  <div class="page no-navbar no-toolbar preloader-page" data-name="preloader">
+    <div class="page-content" style="background: var(--braille-secondary); display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%;">
+      <div class="splash-icon">
+        <i class="icon material-icons">visibility</i>
+      </div>
+      <div class="splash-title">Braille</div>
+      <div class="splash-subtitle">OCR Scanner</div>
+      <div class="splash-progress">
+        <div class="splash-progress-fill" style="width: ${progress}%"></div>
+      </div>
+      <div class="splash-status">${statusText}</div>
+      ${synthWarning && $h`
+        <div style="margin-top:14px;background:rgba(255,193,7,0.18);border:1px solid var(--braille-warning);border-radius:8px;padding:8px 14px;max-width:280px;text-align:center;font-size:var(--font-xs);color:var(--braille-warning);line-height:1.5;">
+          <strong>No template photos found.</strong><br/>
+          Using synthetic dot-pattern templates — accuracy may be lower.<br/>
+          Add JPG or PNG photos to <code>src/assets/braille-templates/</code> for best results.
+        </div>
+      `}
+      ${hasError && $h`
+        <div class="mt-5">
+          <button class="btn-braille-primary" style="width: 160px;" @click=${retry}>
+            <i class="icon material-icons">refresh</i>
+            Retry
+          </button>
+        </div>
+      `}
+    </div>
+  </div>
+</template>
+
+<script>
+import { initializeDetector, templatesAreSynthetic } from '../js/detection/simple-braille-detector.js';
+
+export default (props, { $f7, $store, $update, $on }) => {
+  let progress   = 0;
+  let statusText = 'Loading templates...';
+  let hasError   = false;
+  let synthWarning = false;
+  let ticker     = null;
+
+  async function runInit() {
+    hasError   = false;
+    progress   = 0;
+    statusText = 'Loading Braille templates...';
+    $update();
+
+    // Animate progress bar while async init runs
+    ticker = setInterval(() => {
+      if (progress < 80) { progress += 20; $update(); }
+    }, 100);
+
+    try {
+      await initializeDetector();
+      clearInterval(ticker);
+      ticker     = null;
+      progress   = 100;
+      synthWarning = templatesAreSynthetic;
+      statusText = templatesAreSynthetic
+        ? 'Ready (synthetic templates)'
+        : 'Ready!';
+      $store.dispatch('setTemplatesLoaded', true);
+      if (!$f7.data) $f7.data = {};
+      $f7.data.detectorReady = true;
+      $update();
+      // Stay on splash slightly longer so user can read the warning
+      setTimeout(() => {
+        $f7.views.main.router.navigate('/home/', { clearPreviousHistory: true });
+      }, synthWarning ? 1800 : 300);
+    } catch (err) {
+      clearInterval(ticker);
+      ticker     = null;
+      hasError   = true;
+      statusText = 'Failed to load templates.';
+      console.error('[Preloader] initializeDetector error:', err);
+      $update();
+    }
+  }
+
+  function retry() { runInit(); }
+
+  $on('pageInit', () => { runInit(); });
+
+  return $render;
+};
+</script>

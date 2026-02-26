@@ -1,0 +1,20 @@
+<template>
+  <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:var(--space-7) var(--space-5);">
+    ${icon && $h`
+      <i class="icon material-icons" style="font-size:56px;color:var(--braille-accent);margin-bottom:var(--space-4);">${icon}</i>
+    `}
+    ${title && $h`
+      <div class="text-lg font-bold mb-2">${title}</div>
+    `}
+    ${description && $h`
+      <div class="text-sm mb-5" style="color:var(--f7-theme-color-gray);max-width:260px;line-height:1.55;">${description}</div>
+    `}
+    ${(buttonText && onButtonClick) && $h`
+      <button class="btn-braille-secondary" @click=${onButtonClick}>${buttonText}</button>
+    `}
+  </div>
+</template>
+
+<script>
+export default ({ icon, title, description, buttonText, onButtonClick }) => $render;
+</script>

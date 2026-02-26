@@ -1,0 +1,354 @@
+<template>
+  <div class="page" data-name="home">
+
+    <!-- Navbar -->
+    <div class="navbar">
+      <div class="navbar-bg"></div>
+      <div class="navbar-inner">
+        <div class="navbar-right">
+          <a href="/settings/" class="link icon-only">
+            <i class="icon material-icons">settings</i>
+          </a>
+          <a href="/about/" class="link icon-only">
+            <i class="icon material-icons">info</i>
+          </a>
+        </div>
+        <div class="title">Braille OCR</div>
+      </div>
+    </div>
+
+    <!-- Page content -->
+    <div class="page-content">
+
+      <!-- Hero section -->
+      <div class="block text-center mt-4 mb-4">
+        <div class="flex flex-col items-center gap-2">
+          <div style="width:80px;height:80px;border-radius:20px;background:var(--braille-primary);display:flex;align-items:center;justify-content:center;box-shadow:0 8px 24px rgba(76,175,80,0.3);">
+            <i class="icon material-icons" style="color:#fff;font-size:48px;">camera_alt</i>
+          </div>
+          <div class="text-2xl font-bold color-secondary mt-3">Braille Scanner</div>
+          <div class="text-sm" style="color:#757575;max-width:280px;">
+            Point your camera at Braille text to instantly convert it to readable sentences.
+          </div>
+        </div>
+      </div>
+
+      <!-- Primary CTA -->
+      <div class="block">
+        <button class="btn-braille-primary" @click=${startScanning}>
+          <i class="icon material-icons">camera_alt</i>
+          Start Scanning
+        </button>
+      </div>
+
+      <!-- Upload section -->
+      <div class="block mt-2">
+        <button class="btn-braille-secondary" @click=${triggerPhotoPicker}>
+          <i class="icon material-icons">upload</i>
+          Upload Photo to Text
+        </button>
+        <input
+          type="file"
+          accept="image/*"
+          style="display:none;"
+          @change=${handlePhotoUpload}
+          id="photo-upload-input"
+        />
+      </div>
+
+      <!-- Sample image shortcut -->
+      <div class="block mt-1">
+        <button class="btn-sample" @click=${trySampleImage}>
+          <i class="icon material-icons">science</i>
+          Try "Hello World" Sample
+        </button>
+      </div>
+
+      <!-- Upload result -->
+      ${uploadResult && $h`
+        <div class="block anim-slide-up">
+          <div class="detected-text-card">
+            <div class="text-xs font-semibold color-primary mb-1">DETECTED TEXT</div>
+            <div class="detected-text-content">${uploadResult.text}</div>
+            <div class="flex items-center justify-between">
+              <span class="confidence-badge">
+                <i class="icon material-icons" style="font-size:10px;">check_circle</i>
+                ${Math.round(uploadResult.confidence * 100)}% confidence
+              </span>
+              <span class="text-xs" style="color:#757575;">${uploadResult.charCount} chars</span>
+            </div>
+            <div class="card-actions">
+              <button class="btn-braille-primary" style="flex:1;" @click=${() => speakText(uploadResult.text)}>
+                <i class="icon material-icons">volume_up</i>
+                Speak
+              </button>
+              <button class="btn-braille-secondary" style="flex:1;" @click=${() => copyText(uploadResult.text)}>
+                <i class="icon material-icons">content_copy</i>
+                Copy
+              </button>
+            </div>
+          </div>
+        </div>
+      `}
+
+      <!-- Upload error -->
+      ${uploadError && $h`
+        <div class="block">
+          <div style="background:rgba(244,67,54,0.08);border:1px solid var(--braille-error);border-radius:var(--radius-md);padding:var(--space-3);">
+            <div class="flex items-center gap-2 color-error font-semibold text-sm">
+              <i class="icon material-icons" style="font-size:18px;">error_outline</i>
+              ${uploadError}
+            </div>
+          </div>
+        </div>
+      `}
+
+      <!-- Processing indicator -->
+      ${isProcessing && $h`
+        <div class="block text-center">
+          <div class="preloader color-green"></div>
+          <div class="text-sm mt-2" style="color:#757575;">Analysing Braille...</div>
+        </div>
+      `}
+
+      <!-- Feature cards -->
+      <div class="block">
+        <div class="text-sm font-semibold color-secondary mb-3" style="text-transform:uppercase;letter-spacing:0.08em;">Features</div>
+        <div class="feature-card">
+          <div class="feature-icon">
+            <i class="icon material-icons">center_focus_strong</i>
+          </div>
+          <div class="feature-text">
+            <h4>Template OCR</h4>
+            <p>36 reference photos power accurate Braille character recognition</p>
+          </div>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon" style="background:var(--braille-info);">
+            <i class="icon material-icons">text_fields</i>
+          </div>
+          <div class="feature-text">
+            <h4>Full Sentences</h4>
+            <p>Detects multiple characters and rows — assembles complete sentences</p>
+          </div>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon" style="background:var(--braille-warning);">
+            <i class="icon material-icons">wb_sunny</i>
+          </div>
+          <div class="feature-text">
+            <h4>Flashlight + Grayscale</h4>
+            <p>Built-in torch and grayscale mode for embossed Braille</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent history -->
+      ${getHistory().length > 0 && $h`
+        <div class="block mb-5">
+          <div class="flex items-center justify-between mb-3">
+            <span class="text-sm font-semibold color-secondary" style="text-transform:uppercase;letter-spacing:0.08em;">Recent</span>
+            <a href="#" class="link text-sm color-primary" @click=${clearHistory}>Clear</a>
+          </div>
+          <div class="list media-list">
+            <ul>
+              ${getHistory().slice(0, 5).map((item) => $h`
+                <li>
+                  <a href="#" class="item-link item-content" @click=${() => copyText(item.text)}>
+                    <div class="item-inner">
+                      <div class="item-title">${item.text}</div>
+                      <div class="item-subtitle">${Math.round(item.confidence * 100)}% · ${new Date(item.timestamp).toLocaleTimeString()}</div>
+                    </div>
+                    <div class="item-after">
+                      <i class="icon material-icons" style="color:#bbb;font-size:18px;">content_copy</i>
+                    </div>
+                  </a>
+                </li>
+              `)}
+            </ul>
+          </div>
+        </div>
+      `}
+    </div>
+  </div>
+</template>
+
+<script>
+import { captureFrame, extractCenterROI } from '../js/camera/frame-capture.js';
+import {
+  assessImageQuality,
+  detectBrailleDots,
+  segmentCellRegions,
+  matchCellsToTemplates,
+  assembleSentence,
+} from '../js/detection/simple-braille-detector.js';
+import { processDetectionResult } from '../js/recognition/pattern-matcher.js';
+import sampleImageSrc from '../assets/sample.jpeg';
+
+export default (props, { $f7, $store, $update, $on }) => {
+  let uploadResult  = null;
+  let uploadError   = null;
+  let isProcessing  = false;
+
+  // history is accessed via getter each render so it stays reactive
+  function getHistory() { return $store.getters.detectionHistory || []; }
+
+  function startScanning() {
+    $f7.views.main.router.navigate('/camera/');
+  }
+
+  function triggerPhotoPicker() {
+    uploadResult = null;
+    uploadError  = null;
+    $update();
+    document.getElementById('photo-upload-input').click();
+  }
+
+  async function trySampleImage() {
+    uploadResult  = null;
+    uploadError   = null;
+    isProcessing  = true;
+    $update();
+    try {
+      await _runPipeline(sampleImageSrc);
+    } catch (err) {
+      console.error('[Home] Sample image error:', err);
+      uploadError  = 'Could not process sample image.';
+      isProcessing = false;
+      $update();
+    }
+  }
+
+  async function handlePhotoUpload(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    e.target.value = '';
+
+    uploadResult  = null;
+    uploadError   = null;
+    isProcessing  = true;
+    $update();
+
+    try {
+      // Convert to data: URL — blob: URLs are blocked by the app's CSP.
+      const url = await _fileToDataUrl(file);
+      await _runPipeline(url);
+    } catch (err) {
+      console.error('[Home] Upload error:', err);
+      uploadError  = 'An error occurred while processing the image.';
+      isProcessing = false;
+      $update();
+    }
+  }
+
+  /**
+   * Core detection pipeline shared by upload and the sample-image shortcut.
+   * @param {string} src  Any URL or data URL pointing to the image.
+   */
+  async function _runPipeline(src) {
+    // Load image into a canvas
+    const img = await _loadUrl(src);
+
+    // Resize to max 1280px on the longest side before processing.
+    const MAX_DIM = 1280;
+    const srcW = img.naturalWidth  || img.width;
+    const srcH = img.naturalHeight || img.height;
+    const scale = Math.min(1, MAX_DIM / Math.max(srcW, srcH));
+    const canvasW = Math.round(srcW * scale);
+    const canvasH = Math.round(srcH * scale);
+    console.log(`[Pipeline] Image: ${srcW}×${srcH} → resized to ${canvasW}×${canvasH}`);
+
+    const canvas = document.createElement('canvas');
+    canvas.width  = canvasW;
+    canvas.height = canvasH;
+    canvas.getContext('2d').drawImage(img, 0, 0, canvasW, canvasH);
+
+    const roiData = extractCenterROI(canvas, 1.0, 1.0);
+    const quality = assessImageQuality(roiData);
+    console.log(`[Pipeline] Quality: score=${quality.score} embossed=${quality.embossed} acceptable=${quality.isAcceptable}`);
+
+    if (!quality.isAcceptable && !quality.embossed) {
+      uploadError  = `Image quality too low: ${quality.summary}. ${quality.advice}.`;
+      isProcessing = false;
+      $update();
+      return;
+    }
+
+    const { dots } = detectBrailleDots(roiData);
+    console.log(`[Pipeline] Dots detected: ${dots.length}`);
+
+    if (dots.length === 0) {
+      uploadError  = 'No Braille dots detected. Ensure the photo shows clear Braille text.';
+      isProcessing = false;
+      $update();
+      return;
+    }
+
+    const { cellRegions } = segmentCellRegions(roiData, dots);
+    const realCells = cellRegions.filter(c => !c.isSpace);
+    console.log(`[Pipeline] Cells segmented: ${realCells.length} real + ${cellRegions.length - realCells.length} spaces`);
+
+    if (cellRegions.length === 0) {
+      uploadError  = 'Could not segment Braille cells. Try a clearer photo.';
+      isProcessing = false;
+      $update();
+      return;
+    }
+
+    const matchedCells = matchCellsToTemplates(roiData, cellRegions);
+    const sentence     = assembleSentence(matchedCells);
+    console.log(`[Pipeline] Result: '${sentence.text}' (confidence=${sentence.confidence})`);
+
+    if (!sentence.text || sentence.confidence < 0.25) {
+      uploadError  = `Could not recognise Braille characters. ${realCells.length} cells found but no readable text. Ensure good lighting and focus.`;
+      isProcessing = false;
+      $update();
+      return;
+    }
+
+    uploadResult = sentence;
+    $store.dispatch('addToHistory', { text: sentence.text, confidence: sentence.confidence, braille: '' });
+    isProcessing = false;
+    $update();
+  }
+
+  function speakText(text) {
+    if (!('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+  }
+
+  function copyText(text) {
+    navigator.clipboard.writeText(text).then(() => {
+      $f7.toast.show({ text: 'Text copied to clipboard', closeTimeout: 2000 });
+    });
+  }
+
+  function clearHistory() {
+    $store.dispatch('clearHistory');
+    $update();
+  }
+
+  /** Load an image from any URL/data-URL/blob-URL → HTMLImageElement. */
+  function _loadUrl(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload  = () => resolve(img);
+      img.onerror = reject;
+      img.src = src;
+    });
+  }
+
+  /** Convert a File to a data: URL so the CSP (which blocks blob:) allows it. */
+  function _fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload  = (ev) => resolve(ev.target.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  return $render;
+};
+</script>

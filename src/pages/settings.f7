@@ -1,0 +1,193 @@
+<template>
+  <div class="page" data-name="settings">
+    <div class="navbar">
+      <div class="navbar-bg"></div>
+      <div class="navbar-inner">
+        <div class="left">
+          <a class="link back">
+            <i class="icon icon-back"></i>
+            <span class="if-not-md">Back</span>
+          </a>
+        </div>
+        <div class="title">Settings</div>
+      </div>
+    </div>
+
+    <div class="page-content">
+      <div class="block-title">Detection</div>
+      <div class="list">
+        <ul>
+          <!-- Detection Sensitivity -->
+          <li class="item-content">
+            <div class="item-inner" style="flex-direction:column;align-items:flex-start;gap:4px;">
+              <div style="display:flex;justify-content:space-between;width:100%;">
+                <span class="item-title">Detection Sensitivity</span>
+                <span style="font-weight:600;color:var(--braille-primary);">${sensitivity}</span>
+              </div>
+              <input
+                type="range" min="1" max="5" step="1"
+                style="width:100%;"
+                value="${sensitivity}"
+                @input=${onSensitivityChange}
+              />
+              <div style="display:flex;justify-content:space-between;width:100%;font-size:10px;color:var(--f7-theme-color-gray);">
+                <span>Low</span><span>High</span>
+              </div>
+            </div>
+          </li>
+          <!-- Auto-focus -->
+          <li>
+            <div class="item-content">
+              <div class="item-inner">
+                <div class="item-title">Auto-focus Assist</div>
+                <div class="item-after">
+                  <label class="toggle toggle-init">
+                    <input type="checkbox" checked="${autoFocus}" @change=${onAutoFocusChange}/>
+                    <i class="toggle-icon"></i>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <div class="block-title">Appearance</div>
+      <div class="list">
+        <ul>
+          <!-- Dark Mode -->
+          <li>
+            <div class="item-content">
+              <div class="item-inner">
+                <div class="item-title">Dark Mode</div>
+                <div class="item-after">
+                  <label class="toggle toggle-init">
+                    <input type="checkbox" checked="${darkMode}" @change=${onDarkModeChange}/>
+                    <i class="toggle-icon"></i>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </li>
+          <!-- Text Size -->
+          <li class="item-content">
+            <div class="item-inner" style="flex-direction:column;align-items:flex-start;gap:4px;">
+              <div style="display:flex;justify-content:space-between;width:100%;">
+                <span class="item-title">Result Text Size</span>
+                <span style="font-weight:600;color:var(--braille-primary);">${textSize}px</span>
+              </div>
+              <input
+                type="range" min="12" max="24" step="2"
+                style="width:100%;"
+                value="${textSize}"
+                @input=${onTextSizeChange}
+              />
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <div class="block-title">Accessibility</div>
+      <div class="list">
+        <ul>
+          <!-- Text-to-Speech -->
+          <li>
+            <div class="item-content">
+              <div class="item-inner">
+                <div class="item-title">Text-to-Speech</div>
+                <div class="item-after">
+                  <label class="toggle toggle-init">
+                    <input type="checkbox" checked="${ttsEnabled}" @change=${onTtsChange}/>
+                    <i class="toggle-icon"></i>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </li>
+          <!-- Sound Effects -->
+          <li>
+            <div class="item-content">
+              <div class="item-inner">
+                <div class="item-title">Sound Effects</div>
+                <div class="item-after">
+                  <label class="toggle toggle-init">
+                    <input type="checkbox" checked="${soundEnabled}" @change=${onSoundChange}/>
+                    <i class="toggle-icon"></i>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <div class="block-title">History</div>
+      <div class="list">
+        <ul>
+          <li>
+            <a class="item-content item-link" @click=${clearHistory}>
+              <div class="item-inner">
+                <div class="item-title" style="color:var(--f7-color-red);">Clear Detection History</div>
+              </div>
+            </a>
+          </li>
+        </ul>
+      </div>
+
+      <div class="block text-align-center" style="color:var(--f7-theme-color-gray);font-size:var(--font-xs);">
+        Braille OCR v1.0.0 — Template-based recognition
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+export default (props, { $store, $f7, $update, $on }) => {
+  // F7 store getters return plain values — no .value wrapper
+  let sensitivity  = $store.getters.settings?.detectionSensitivity ?? 3;
+  let autoFocus    = $store.getters.settings?.autoFocusEnabled     ?? true;
+  let darkMode     = $store.getters.darkMode                        ?? false;
+  let textSize     = $store.getters.settings?.textSize              ?? 16;
+  let ttsEnabled   = $store.getters.settings?.textToSpeechEnabled   ?? true;
+  let soundEnabled = $store.getters.settings?.soundEffectsEnabled   ?? true;
+
+  function onSensitivityChange(e) {
+    sensitivity = Number(e.target.value);
+    $store.dispatch('updateSettings', { detectionSensitivity: sensitivity });
+    $update();
+  }
+  function onAutoFocusChange(e) {
+    autoFocus = e.target.checked;
+    $store.dispatch('updateSettings', { autoFocusEnabled: autoFocus });
+    $update();
+  }
+  function onDarkModeChange() {
+    $store.dispatch('toggleDarkMode');
+    darkMode = !darkMode;
+    $update();
+  }
+  function onTextSizeChange(e) {
+    textSize = Number(e.target.value);
+    $store.dispatch('updateSettings', { textSize });
+    $update();
+  }
+  function onTtsChange(e) {
+    ttsEnabled = e.target.checked;
+    $store.dispatch('updateSettings', { textToSpeechEnabled: ttsEnabled });
+    $update();
+  }
+  function onSoundChange(e) {
+    soundEnabled = e.target.checked;
+    $store.dispatch('updateSettings', { soundEffectsEnabled: soundEnabled });
+    $update();
+  }
+  function clearHistory() {
+    $f7.dialog.confirm('Clear all detection history?', 'Clear History', () => {
+      $store.dispatch('clearHistory');
+      $f7.toast.show({ text: 'History cleared', closeTimeout: 2000 });
+    });
+  }
+
+  return $render;
+};
+</script>

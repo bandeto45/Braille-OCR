@@ -1,0 +1,153 @@
+/**
+ * Braille Mappings — Grade 1 (Uncontracted) Braille
+ * 36 template characters: a-z (letters) + 0-9 (digits)
+ *
+ * Unicode Braille Patterns: U+2800–U+28FF
+ * Standard Braille dot numbering (2×3 grid):
+ *   Col1 (left)  Col2 (right)
+ *       1            4        <- row 1 (top)
+ *       2            5        <- row 2 (mid)
+ *       3            6        <- row 3 (bot)
+ *
+ * bit 0 = dot 1 · bit 1 = dot 2 · bit 2 = dot 3
+ * bit 3 = dot 4 · bit 4 = dot 5 · bit 5 = dot 6
+ */
+
+// ─── Grade 1 mapping: Braille Unicode char → plain text char ──────────────────
+export const grade1Mapping = {
+  '\u2801': 'a', // dots 1
+  '\u2803': 'b', // dots 1,2
+  '\u2809': 'c', // dots 1,4
+  '\u2819': 'd', // dots 1,4,5
+  '\u2811': 'e', // dots 1,5
+  '\u280B': 'f', // dots 1,2,4
+  '\u281B': 'g', // dots 1,2,4,5
+  '\u2813': 'h', // dots 1,2,5
+  '\u280A': 'i', // dots 2,4
+  '\u281A': 'j', // dots 2,4,5
+  '\u2805': 'k', // dots 1,3
+  '\u2807': 'l', // dots 1,2,3
+  '\u280D': 'm', // dots 1,3,4
+  '\u281D': 'n', // dots 1,3,4,5
+  '\u2815': 'o', // dots 1,3,5
+  '\u280F': 'p', // dots 1,2,3,4
+  '\u281F': 'q', // dots 1,2,3,4,5
+  '\u2817': 'r', // dots 1,2,3,5
+  '\u280E': 's', // dots 2,3,4
+  '\u281E': 't', // dots 2,3,4,5
+  '\u2825': 'u', // dots 1,3,6
+  '\u2827': 'v', // dots 1,2,3,6
+  '\u283A': 'w', // dots 2,4,5,6
+  '\u282D': 'x', // dots 1,3,4,6
+  '\u283D': 'y', // dots 1,3,4,5,6
+  '\u2835': 'z', // dots 1,3,5,6
+  // Number sign (prefix for digits)
+  '\u283C': '#', // dots 3,4,5,6
+  // Punctuation
+  '\u2800': ' ', // space
+  '\u2802': ',', // dots 2
+  '\u2832': '.', // dots 2,5,6
+  '\u2816': '!', // dots 2,3,5
+  '\u2826': '?', // dots 2,3,5,6
+};
+
+// ─── Reverse mapping: plain text char → Braille Unicode char ─────────────────
+export const textToBraille = Object.fromEntries(
+  Object.entries(grade1Mapping).map(([k, v]) => [v, k])
+);
+
+// ─── 36 Template Characters ──────────────────────────────────────────────────
+export const TEMPLATE_CHARS = [
+  'a','b','c','d','e','f','g','h','i','j',
+  'k','l','m','n','o','p','q','r','s','t',
+  'u','v','w','x','y','z',
+  '0','1','2','3','4','5','6','7','8','9',
+];
+
+// ─── Explicit dot patterns for each template character ───────────────────────
+// 6-bit mask: bit 0 = dot 1 (left-top), bit 1 = dot 2 (left-mid),
+//             bit 2 = dot 3 (left-bot), bit 3 = dot 4 (right-top),
+//             bit 4 = dot 5 (right-mid), bit 5 = dot 6 (right-bot)
+export const CHAR_DOT_PATTERNS = {
+  a: 0b000001, b: 0b000011, c: 0b001001, d: 0b011001, e: 0b010001,
+  f: 0b001011, g: 0b011011, h: 0b010011, i: 0b001010, j: 0b011010,
+  k: 0b000101, l: 0b000111, m: 0b001101, n: 0b011101, o: 0b010101,
+  p: 0b001111, q: 0b011111, r: 0b010111, s: 0b001110, t: 0b011110,
+  u: 0b100101, v: 0b100111, w: 0b111010, x: 0b101101, y: 0b111101,
+  z: 0b110101,
+  // Grade 1 digits — same dot patterns as a–j (context: follow number sign)
+  '1': 0b000001, '2': 0b000011, '3': 0b001001, '4': 0b011001, '5': 0b010001,
+  '6': 0b001011, '7': 0b011011, '8': 0b010011, '9': 0b001010, '0': 0b011010,
+};
+
+/**
+ * Reverse lookup: 6-bit dot pattern → character.
+ * Letters (a–z) take priority over digits, which share the same dot patterns
+ * as a–j in Grade 1 Braille.  We build the Map manually so duplicate patterns
+ * keep the FIRST (letter) entry rather than being overwritten by the digit.
+ */
+export const DOT_PATTERN_TO_CHAR = (() => {
+  const m = new Map();
+  const order = [
+    'a','b','c','d','e','f','g','h','i','j',
+    'k','l','m','n','o','p','q','r','s','t',
+    'u','v','w','x','y','z',
+    '0','1','2','3','4','5','6','7','8','9',
+  ];
+  for (const ch of order) {
+    const pat = CHAR_DOT_PATTERNS[ch];
+    if (!m.has(pat)) m.set(pat, ch); // first entry wins → letters beat digits
+  }
+  return m;
+})();
+
+/**
+ * Convert a Braille Unicode string to plain text.
+ * @param {string} str  Braille Unicode string
+ * @returns {string}
+ */
+export function brailleToText(str) {
+  return [...str].map(ch => grade1Mapping[ch] ?? '?').join('');
+}
+
+/**
+ * Convert plain text to a Braille Unicode string.
+ * @param {string} text
+ * @returns {string}
+ */
+export function textToBrailleString(text) {
+  return [...text.toLowerCase()]
+    .map(ch => textToBraille[ch] ?? '\u2800')
+    .join('');
+}
+
+/**
+ * Returns true if the string consists entirely of Braille Unicode characters.
+ * @param {string} str
+ * @returns {boolean}
+ */
+export function isValidBraille(str) {
+  return /^[\u2800-\u28FF]+$/.test(str);
+}
+
+/**
+ * Create a Braille Unicode character from an array of dot numbers (1–6).
+ * @param {number[]} dotNumbers  e.g. [1,2] → 'b'
+ * @returns {string}
+ */
+export function createBrailleFromDots(dotNumbers) {
+  let code = 0;
+  for (const dot of dotNumbers) {
+    if (dot >= 1 && dot <= 6) code |= (1 << (dot - 1));
+  }
+  return String.fromCharCode(0x2800 + code);
+}
+
+/**
+ * Return the PNG filename for a given template character.
+ * @param {string} ch  One of TEMPLATE_CHARS (e.g. 'a', 'Z', '3')
+ * @returns {string}   e.g. 'a.png', 'z.png', '3.png'
+ */
+export function charToTemplateName(ch) {
+  return `${ch.toLowerCase()}.png`;
+}

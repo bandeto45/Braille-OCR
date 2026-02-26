@@ -1,0 +1,106 @@
+<template>
+  <div class="page" data-name="about">
+    <div class="navbar">
+      <div class="navbar-bg"></div>
+      <div class="navbar-inner">
+        <div class="left">
+          <a class="link back">
+            <i class="icon icon-back"></i>
+            <span class="if-not-md">Back</span>
+          </a>
+        </div>
+        <div class="title">About</div>
+      </div>
+    </div>
+
+    <div class="page-content">
+      <!-- Hero -->
+      <div style="text-align:center;padding:var(--space-6) var(--space-5) var(--space-5);">
+        <div style="width:80px;height:80px;border-radius:var(--radius-lg);background:linear-gradient(135deg,var(--braille-primary),#1B5E20);display:inline-flex;align-items:center;justify-content:center;margin-bottom:var(--space-3);box-shadow:0 8px 24px rgba(76,175,80,0.35);">
+          <i class="icon material-icons" style="font-size:40px;color:#fff;">auto_stories</i>
+        </div>
+        <div class="text-2xl font-bold">Braille OCR</div>
+        <div class="text-sm mt-1" style="color:var(--f7-theme-color-gray);">Template-based Braille Recognition</div>
+        <div class="text-xs mt-1" style="color:var(--f7-theme-color-gray);">Version 1.0.0</div>
+      </div>
+
+      <!-- How it works -->
+      <div class="block-title">How It Works</div>
+      <div class="block">
+        <p style="line-height:1.65;color:var(--f7-theme-color-gray);">
+          Braille OCR uses <strong>Normalised Cross-Correlation (NCC)</strong> to match
+          captured braille cells against a library of 36 reference template photographs
+          (a–z and 0–9). No machine learning model or internet connection is required —
+          all recognition runs entirely on-device.
+        </p>
+        <ol style="padding-left:20px;line-height:2;color:var(--f7-theme-color-gray);">
+          <li>Camera frame is captured and centre 80 % × 60 % region is extracted.</li>
+          <li>Image quality is assessed (brightness, contrast, blur).</li>
+          <li>Braille dots are detected using adaptive thresholding.</li>
+          <li>Dot clusters are segmented into individual character cells.</li>
+          <li>Each cell is compared to all 36 template images using NCC.</li>
+          <li>The best-matching template (above 40 % confidence) maps to a character.</li>
+          <li>Characters are assembled left-to-right with automatic word-gap spacing.</li>
+          <li>Three consecutive matching frames confirm a stable reading.</li>
+        </ol>
+      </div>
+
+      <!-- Supported characters -->
+      <div class="block-title">Supported Characters</div>
+      <div class="block">
+        <div style="font-family:monospace;font-size:var(--font-md);letter-spacing:3px;line-height:2;text-align:center;font-weight:600;">
+          a b c d e f g h i j k l m<br/>
+          n o p q r s t u v w x y z<br/>
+          0 1 2 3 4 5 6 7 8 9
+        </div>
+      </div>
+
+      <!-- Tips -->
+      <div class="block-title">Tips for Best Results</div>
+      <div class="block">
+        <ul style="padding-left:20px;line-height:2;color:var(--f7-theme-color-gray);">
+          <li>Use even, diffuse lighting — avoid harsh shadows.</li>
+          <li>Hold the device 15–25 cm above the page.</li>
+          <li>Keep the camera parallel to the page surface.</li>
+          <li>Enable the torch (<i class="icon material-icons" style="font-size:14px;vertical-align:middle;">flash_on</i>) in low light.</li>
+          <li>Enable grayscale mode for embossed Braille pages.</li>
+          <li>Upload a photo for more controlled processing.</li>
+        </ul>
+      </div>
+
+      <!-- Links -->
+      <div class="block-title">Open Source</div>
+      <div class="list">
+        <ul>
+          <li>
+            <a class="item-content item-link external" href="https://github.com/braille-ocr" target="_blank">
+              <div class="item-inner">
+                <div class="item-title">GitHub Repository</div>
+                <div class="item-after"><i class="icon material-icons" style="font-size:16px;">open_in_new</i></div>
+              </div>
+            </a>
+          </li>
+          <li>
+            <a class="item-content item-link external" href="https://www.afb.org/braille-bug/braille-letters-print" target="_blank">
+              <div class="item-inner">
+                <div class="item-title">Braille Alphabet Reference</div>
+                <div class="item-after"><i class="icon material-icons" style="font-size:16px;">open_in_new</i></div>
+              </div>
+            </a>
+          </li>
+        </ul>
+      </div>
+
+      <div class="block text-align-center" style="color:var(--f7-theme-color-gray);font-size:var(--font-xs);">
+        Built with Framework7 · Vite · Cordova<br/>
+        Template OCR — NCC matching — canvas API
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+export default (props, { $f7 }) => {
+  return $render;
+};
+</script>

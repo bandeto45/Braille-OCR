@@ -1,0 +1,422 @@
+<template>
+  <div class="page no-navbar no-toolbar" data-name="camera" style="background:#000;">
+
+    <!-- Loading overlay -->
+    ${isLoading && $h`
+      <div style="position:absolute;inset:0;z-index:100;background:rgba(0,0,0,0.85);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;">
+        <div class="preloader color-green"></div>
+        <div style="color:#fff;font-size:var(--font-sm);">${loadingMessage}</div>
+      </div>
+    `}
+
+    <!-- Back button -->
+    <div style="position:absolute;top:calc(env(safe-area-inset-top,0px) + 12px);left:16px;z-index:50;">
+      <a href="/home/" class="camera-control-btn" style="background:rgba(0,0,0,0.6);">
+        <i class="icon material-icons">arrow_back</i>
+      </a>
+    </div>
+
+    <!-- Camera unavailable state -->
+    ${!cameraAvailable && $h`
+      <div style="position:absolute;inset:0;z-index:90;display:flex;align-items:center;justify-content:center;padding:var(--space-5);">
+        <div style="text-align:center;color:#fff;">
+          <i class="icon material-icons" style="font-size:64px;color:var(--braille-accent);">videocam_off</i>
+          <div class="text-xl font-bold mt-3 mb-2">Camera Access Required</div>
+          <div class="text-sm mb-5" style="color:rgba(255,255,255,0.7);">Please grant camera permission to use Braille scanning.</div>
+          <button class="btn-braille-primary" style="width:200px;" @click=${requestCamera}>
+            <i class="icon material-icons">camera_alt</i>
+            Enable Camera
+          </button>
+        </div>
+      </div>
+    `}
+
+    <!-- Video element -->
+    <video
+      id="camera-video"
+      autoplay
+      playsinline
+      muted
+      style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;${grayscaleOn ? 'filter:grayscale(100%);' : ''}"
+    ></video>
+
+    <!-- Debug overlay -->
+    <div style="position:absolute;top:60px;left:8px;z-index:60;pointer-events:none;background:rgba(0,0,0,0.5);padding:4px 8px;border-radius:6px;font-size:10px;color:#fff;font-family:monospace;line-height:1.5;">
+      ${debugInfo}
+    </div>
+
+    <!-- Guide box -->
+    <div class="braille-guide-box">
+      <div class="braille-guide-crosshair-h"></div>
+      <div class="braille-guide-crosshair-v"></div>
+    </div>
+
+    <!-- Guide label (above box) -->
+    <div style="position:absolute;top:calc(50% - 135px);left:50%;transform:translateX(-50%);pointer-events:none;text-align:center;">
+      <div style="color:#fff;font-size:var(--font-xs);font-weight:600;text-shadow:0 1px 4px rgba(0,0,0,0.9);white-space:nowrap;">Align one Braille line inside this box</div>
+      <div style="color:rgba(255,255,255,0.6);font-size:10px;margin-top:2px;">Keep rows level and centred</div>
+    </div>
+
+    <!-- Scanning status pill -->
+    ${!detectedText && $h`
+      <div class="scanning-status-pill">${scanningStatus}</div>
+    `}
+
+    <!-- Detected text overlay -->
+    ${detectedText && $h`
+      <div style="position:absolute;top:52%;left:50%;transform:translateX(-50%);width:88%;z-index:40;" class="anim-slide-up">
+        <div style="background:rgba(0,0,0,0.78);border:2px solid var(--braille-primary);border-radius:var(--radius-md);padding:var(--space-3) var(--space-4);backdrop-filter:blur(6px);">
+          <div style="color:#fff;font-size:var(--font-md);font-weight:600;line-height:1.4;word-break:break-word;">${detectedText}</div>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+            <span class="confidence-badge">${Math.round(confidence * 100)}%</span>
+            <button class="camera-control-btn" style="width:36px;height:36px;" @click=${speakDetected}>
+              <i class="icon material-icons" style="font-size:18px;">volume_up</i>
+            </button>
+            <button class="camera-control-btn" style="width:36px;height:36px;" @click=${copyDetected}>
+              <i class="icon material-icons" style="font-size:18px;">content_copy</i>
+            </button>
+          </div>
+        </div>
+      </div>
+    `}
+
+    <!-- Camera controls row -->
+    <div style="position:absolute;bottom:calc(env(safe-area-inset-bottom,0px) + 24px);left:0;right:0;z-index:50;display:flex;align-items:center;justify-content:center;gap:20px;">
+      <!-- Flashlight -->
+      <button class="camera-control-btn ${flashlightOn ? 'active' : ''}" @click=${toggleFlashlight}>
+        <i class="icon material-icons">${flashlightOn ? 'flash_off' : 'flash_on'}</i>
+      </button>
+      <!-- Flip camera -->
+      <button class="camera-control-btn" @click=${flipCamera}>
+        <i class="icon material-icons">flip_camera_ios</i>
+      </button>
+      <!-- Grayscale -->
+      <button class="camera-control-btn ${grayscaleOn ? 'active' : ''}" @click=${toggleGrayscale}>
+        <i class="icon material-icons">${grayscaleOn ? 'filter' : 'filter_b_and_w'}</i>
+      </button>
+    </div>
+
+  </div>
+</template>
+
+<script>
+import { captureFrame, extractCenterROI } from '../js/camera/frame-capture.js';
+import {
+  assessImageQuality,
+  detectBrailleDots,
+  segmentCellRegions,
+  matchCellsToTemplates,
+  assembleSentence,
+} from '../js/detection/simple-braille-detector.js';
+import { findConsistentResult, processDetectionResult } from '../js/recognition/pattern-matcher.js';
+import { throttle } from '../js/utils/throttle.js';
+
+export default (props, { $f7, $store, $update, $on, $el }) => {
+
+  // ── Local state ──────────────────────────────────────────────────────────
+  let cameraAvailable = true;
+  let detectedText    = '';
+  let confidence      = 0;
+  let flashlightOn    = false;
+  let grayscaleOn     = false;
+  let stream          = null;
+  let facingMode      = 'environment';
+  let processingInterval = null;
+  let videoEl         = null;
+  let cordovaReady    = false;
+  let isLoading       = true;
+  let loadingMessage  = 'Initializing...';
+  let detectorReady   = true;
+  let scanningStatus  = 'Position Braille in centre guide';
+  let debugInfo       = '';
+  let recentRecognitionResults = [];
+  let activeDetectionDialog    = null;
+  let isDetectionPaused        = false;
+
+  const ALERT_COOLDOWN_MS   = 30000;
+  const messageAlertHistory = new Map();
+
+  // ── Throttled frame processor ────────────────────────────────────────────
+  const throttledProcessFrame = throttle(processFrame, 200);
+
+  // ── Camera setup ─────────────────────────────────────────────────────────
+  async function waitForCordova() {
+    return new Promise(resolve => {
+      if (window.cordova) {
+        if (cordovaReady) { resolve(); return; }
+        const timer = setTimeout(() => { cordovaReady = true; resolve(); }, 2000);
+        document.addEventListener('deviceready', () => {
+          clearTimeout(timer);
+          cordovaReady = true;
+          resolve();
+        }, { once: true });
+      } else { resolve(); }
+    });
+  }
+
+  async function requestCameraPermission() {
+    if (window.cordova && window.cordova.plugins && window.cordova.plugins.permissions) {
+      return new Promise((resolve) => {
+        const perms = window.cordova.plugins.permissions;
+        perms.requestPermissions([perms.CAMERA], (status) => {
+          resolve(!!status.hasPermission);
+        }, () => resolve(false));
+      });
+    }
+    // Web / iOS fallback — use getUserMedia as the permission request
+    try {
+      const testStream = await navigator.mediaDevices.getUserMedia({ video: true });
+      testStream.getTracks().forEach(t => t.stop());
+      return true;
+    } catch { return false; }
+  }
+
+  async function getUserMediaWithTimeout(constraints, timeout = 10000) {
+    return Promise.race([
+      navigator.mediaDevices.getUserMedia(constraints),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Camera timeout')), timeout)),
+    ]);
+  }
+
+  async function requestCamera() {
+    try {
+      loadingMessage = 'Requesting camera permission...';
+      $update();
+
+      await waitForCordova();
+      const granted = await requestCameraPermission();
+      if (!granted) {
+        cameraAvailable = false;
+        isLoading = false;
+        $update();
+        return;
+      }
+
+      loadingMessage = 'Starting camera...';
+      $update();
+
+      stream = await getUserMediaWithTimeout({
+        video: {
+          facingMode,
+          width:  { ideal: 1280 },
+          height: { ideal: 720  },
+        },
+      }, 10000);
+
+      videoEl = $el.value.querySelector('#camera-video');
+      videoEl.muted        = true;
+      videoEl.playsInline  = true;
+      videoEl.autoplay     = true;
+      videoEl.setAttribute('playsinline', 'true');
+      videoEl.setAttribute('webkit-playsinline', 'true');
+      videoEl.width  = 1280;
+      videoEl.height = 720;
+      videoEl.style.objectFit = 'cover';
+      videoEl.srcObject = stream;
+
+      setTimeout(() => {
+        videoEl.play().catch(() => {});
+        isLoading = false;
+        $store.dispatch('setCameraActive', true);
+        $update();
+      }, 200);
+
+      setTimeout(() => startProcessing(), 500);
+
+    } catch (err) {
+      console.error('[Camera] requestCamera error:', err);
+      cameraAvailable = false;
+      isLoading       = false;
+      $update();
+    }
+  }
+
+  function startProcessing() {
+    if (processingInterval) clearInterval(processingInterval);
+    $store.dispatch('setDetecting', true);
+    processingInterval = setInterval(() => throttledProcessFrame(), 200);
+  }
+
+  // ── Frame processing ─────────────────────────────────────────────────────
+  async function processFrame() {
+    if (!videoEl || isDetectionPaused || videoEl.readyState < 2) return;
+
+    try {
+      debugInfo = `${videoEl.videoWidth}×${videoEl.videoHeight} | rs:${videoEl.readyState} | dots processing`;
+
+      const canvas  = captureFrame(videoEl);
+      const roiData = extractCenterROI(canvas, 0.8, 0.6);
+      const quality = assessImageQuality(roiData);
+
+      if (!quality.isAcceptable && !quality.embossed) {
+        scanningStatus = `Improve image: ${quality.summary} (${Math.round(quality.score * 100)}%)`;
+        $update(); return;
+      }
+
+      if (quality.embossed) {
+        scanningStatus = 'Embossed Braille — hold steady';
+      } else {
+        scanningStatus = 'Scanning for Braille...';
+      }
+
+      const { dots } = detectBrailleDots(roiData);
+
+      if (dots.length === 0) {
+        scanningStatus = 'No Braille detected — move closer or adjust angle';
+        $update(); return;
+      }
+
+      if (dots.length > 200) {
+        scanningStatus = 'Too many dots/noise detected — hold steady and move slightly farther';
+        $update(); return;
+      }
+
+      const { cellRegions } = segmentCellRegions(roiData, dots);
+
+      if (cellRegions.length === 0) {
+        scanningStatus = 'Dots detected but not valid Braille — adjust position';
+        $update(); return;
+      }
+
+      scanningStatus = 'Cells found, matching characters...';
+
+      const matchedCells  = matchCellsToTemplates(roiData, cellRegions);
+      const result        = processDetectionResult(matchedCells, 0.45);
+
+      if (!result) {
+        scanningStatus = 'Reading... hold steady for a moment';
+        $update(); return;
+      }
+
+      // Stability buffer
+      recentRecognitionResults.push(result);
+      if (recentRecognitionResults.length > 6) recentRecognitionResults.shift();
+
+      const stable = findConsistentResult(recentRecognitionResults, 3);
+
+      if (!stable) {
+        scanningStatus = 'Reading... hold steady for a moment';
+        $update(); return;
+      }
+
+      // Success
+      scanningStatus = 'Braille detected!';
+      debugInfo      = `${videoEl.videoWidth}×${videoEl.videoHeight} | "${stable.text}"`;
+
+      const isNewText = stable.text !== detectedText;
+      detectedText    = stable.text;
+      confidence      = stable.confidence;
+
+      if (isNewText && navigator.vibrate) navigator.vibrate(100);
+
+      $store.dispatch('setDetectedText', stable.text);
+      $store.dispatch('setConfidence',   stable.confidence);
+
+      const now = Date.now();
+      const lastAlert = messageAlertHistory.get(stable.text) || 0;
+      if (isNewText && now - lastAlert > ALERT_COOLDOWN_MS) {
+        messageAlertHistory.set(stable.text, now);
+        showDetectionAlert(stable.text);
+      }
+
+      $store.dispatch('addToHistory', { text: stable.text, confidence: stable.confidence, braille: stable.braille || '' });
+      $update();
+
+    } catch (err) {
+      console.warn('[Camera] processFrame error:', err.message);
+    }
+  }
+
+  function showDetectionAlert(text) {
+    if (activeDetectionDialog) return;
+    isDetectionPaused = true;
+    activeDetectionDialog = $f7.dialog.create({
+      title: 'Braille Detected',
+      text,
+      buttons: [
+        {
+          text: 'Copy',
+          bold: true,
+          onClick: () => {
+            navigator.clipboard.writeText(text).then(() => {
+              $f7.toast.show({ text: 'Copied!', closeTimeout: 1500 });
+            });
+          },
+        },
+        { text: 'Close' },
+      ],
+      on: {
+        closed: () => {
+          activeDetectionDialog = null;
+          isDetectionPaused     = false;
+          recentRecognitionResults = [];
+          scanningStatus = 'Resuming scan... align Braille in centre guide';
+          $update();
+        },
+      },
+    });
+    activeDetectionDialog.open();
+  }
+
+  // ── Camera controls ───────────────────────────────────────────────────────
+  async function toggleFlashlight() {
+    if (!stream) return;
+    const [track] = stream.getVideoTracks();
+    if (!track) return;
+    const capabilities = track.getCapabilities ? track.getCapabilities() : {};
+    if (!capabilities.torch) {
+      $f7.toast.show({ text: 'Torch not available on this device', closeTimeout: 2000 });
+      return;
+    }
+    flashlightOn = !flashlightOn;
+    await track.applyConstraints({ advanced: [{ torch: flashlightOn }] }).catch(() => {});
+    $store.dispatch('setFlashlight', flashlightOn);
+    $update();
+  }
+
+  async function flipCamera() {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    facingMode = facingMode === 'environment' ? 'user' : 'environment';
+    $store.dispatch('setFacingMode', facingMode);
+    isLoading      = true;
+    loadingMessage = 'Switching camera...';
+    $update();
+    await requestCamera();
+  }
+
+  function toggleGrayscale() {
+    grayscaleOn = !grayscaleOn;
+    $update();
+  }
+
+  function speakDetected() {
+    if (!detectedText || !('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(new SpeechSynthesisUtterance(detectedText));
+  }
+
+  function copyDetected() {
+    if (!detectedText) return;
+    navigator.clipboard.writeText(detectedText).then(() => {
+      $f7.toast.show({ text: 'Text copied to clipboard', closeTimeout: 2000 });
+    });
+  }
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────────
+  $on('pageInit', () => {
+    // 10 s force-hide loading failsafe
+    setTimeout(() => { if (isLoading) { isLoading = false; $update(); } }, 10000);
+    requestCamera();
+  });
+
+  $on('pageBeforeRemove', () => {
+    if (processingInterval) clearInterval(processingInterval);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (videoEl) { videoEl.srcObject = null; }
+    $store.dispatch('setCameraActive', false);
+    $store.dispatch('setDetecting',    false);
+  });
+
+  return $render;
+};
+</script>
