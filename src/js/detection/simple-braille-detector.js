@@ -6,24 +6,23 @@
  * then groups them into 2×3 Braille cells and maps each cell's 6-bit dot
  * pattern to a character via BRAILLE_PATTERN_MAP — no template photos needed.
  *
- * Pipeline:
- *   Image → Grayscale → CLAHE contrast → Otsu threshold → findContours
- *     → circular-blob filter → dot clusters → 6-bit pattern → character
+ * Two detection modes — selected automatically from image statistics:
  *
- * Dot-position layout (standard Braille 2×3 grid):
- *   dot 1 (left-top)  │ dot 4 (right-top)
- *   dot 2 (left-mid)  │ dot 5 (right-mid)
- *   dot 3 (left-bot)  │ dot 6 (right-bot)
+ *   PRINTED Braille (mean < 150 or stdDev ≥ 20):
+ *     CLAHE(2.0, 8×8) → GaussianBlur(5,5) → Otsu INV → MorphOpen(3×3)
+ *     circularity ≥ 0.35
  *
- * 6-bit binary string: positions 0–5 = dots 1–6
- *   "100000" → 'a'  (dot 1 only)
- *   "110000" → 'b'  (dots 1,2)
- *   "100100" → 'c'  (dots 1,4) …
+ *   EMBOSSED Braille (white-on-white, mean > 150, stdDev < 20):
+ *     Dots are raised bumps with very subtle shadow contrast (stdDev can be < 20).
+ *     preprocessForBraille(embossed=true): percentile-stretch [p2,p98]→[0,255]
+ *       + unsharpMask(amount=2.5, radius=5) to amplify shadow micro-gradients.
+ *     Then: GaussianBlur(3,3,0.8) → Otsu INV → MorphOpen(5×5)
+ *     circularity ≥ 0.25 (shadow-based blobs are less round than ink dots)
  *
  * Falls back to Canvas API blob detection when OpenCV.js is not yet loaded.
  *
  * Exports:
- *   initializeDetector()     async — loads OpenCV.js WASM
+ *   initializeDetector()     async — loads OpenCV.js WASM from CDN <script> tag
  *   assessImageQuality(imageData)
  *   detectBrailleDots(imageData)
  *   segmentCellRegions(imageData, dots, estCellW, estCellH)
@@ -54,83 +53,128 @@ export let templatesMissingCount = 0;
 
 // ─── OpenCV dot detection ─────────────────────────────────────────────────────
 /**
- * Detect Braille dots using OpenCV.js:
- *   1. Convert to grayscale
- *   2. Apply CLAHE for local contrast enhancement
- *   3. Gaussian blur to reduce noise
- *   4. cv.threshold (Otsu, inverted) — dots are dark on a light background
- *   5. Morphological opening to remove small noise blobs
- *   6. cv.findContours — extract all external contours
- *   7. Filter by area and circularity (≥ 0.35) to keep only round dot blobs
+ * Shared contour → dot extractor used by both detection paths.
+ * Filters by area and circularity, then returns centroid + radius arrays.
+ *
+ * @param {object}    cv              OpenCV.js instance
+ * @param {MatVector} contours        Result of findContours
+ * @param {ImageData} imageData       Original image (for area bounds)
+ * @param {number}    minCircularity  Reject blobs below this circularity (4π·A/P²)
+ * @returns {Array<{x, y, radius, confidence}>}
+ */
+function _extractDots(cv, contours, imageData, minCircularity) {
+  const imgArea = imageData.width * imageData.height;
+  const minArea = Math.max(4,   imgArea * 0.00005);
+  const maxArea = Math.max(800, imgArea * 0.04);
+
+  const dots = [];
+  for (let i = 0; i < contours.size(); i++) {
+    const contour = contours.get(i);
+    const area    = cv.contourArea(contour);
+
+    if (area < minArea || area > maxArea) { contour.delete(); continue; }
+
+    const perimeter = cv.arcLength(contour, true);
+    if (perimeter === 0) { contour.delete(); continue; }
+    const circularity = (4 * Math.PI * area) / (perimeter * perimeter);
+    if (circularity < minCircularity) { contour.delete(); continue; }
+
+    const moments = cv.moments(contour);
+    if (moments.m00 === 0) { contour.delete(); continue; }
+    const cx = moments.m10 / moments.m00;
+    const cy = moments.m01 / moments.m00;
+    const radius = Math.sqrt(area / Math.PI);
+
+    dots.push({ x: cx, y: cy, radius, confidence: Math.min(1, circularity) });
+    contour.delete();
+  }
+  return dots;
+}
+
+/**
+ * Detect Braille dots using OpenCV.js.
+ *
+ * NON-EMBOSSED path (printed/photographed Braille):
+ *   1. Grayscale → CLAHE(2.0, 8×8) → GaussianBlur(5,5) → Otsu INV
+ *   2. MorphOpen(3×3) → findContours → circularity ≥ 0.35
+ *
+ * EMBOSSED path (white-on-white raised-dot Braille):
+ *   Dots cast only subtle shadows (stdDev can be < 20).  Raw image contrast
+ *   is too low for CLAHE alone to reliably separate dots from paper.
+ *   Solution: run preprocessForBraille(imageData, true) FIRST:
+ *     • Percentile stretch [p2, p98] → [0, 255]  (expands dynamic range)
+ *     • unsharpMask(amount=2.5, radius=5)         (amplifies dot-shadow edges)
+ *   Then feed the much higher-contrast result into a lighter OpenCV pipeline:
+ *   1. Grayscale → GaussianBlur(3,3,0.8) → Otsu INV
+ *   2. MorphOpen(5×5 — larger to remove noise from aggressive sharpening)
+ *   3. findContours → circularity ≥ 0.25 (shadows soften blob outlines)
  *
  * @param {ImageData} imageData
+ * @param {boolean}   isEmbossed  Use embossed preprocessing when true
  * @returns {Array<{x, y, radius, confidence}>} detected dot centroids
  */
-function _detectDotsOpenCV(imageData) {
+function _detectDotsOpenCV(imageData, isEmbossed = false) {
   const cv   = _cv;
   const mats = [];
   const track = (m) => { mats.push(m); return m; };
 
   try {
-    const src = track(cv.matFromImageData(imageData));
+    if (isEmbossed) {
+      // ── EMBOSSED PATH ──────────────────────────────────────────────────────
+      // Pre-process: percentile stretch + unsharp mask amplifies dot shadows.
+      // The resulting ImageData has dark dot silhouettes on a bright background.
+      const preprocessed = preprocessForBraille(imageData, true);
+      const src  = track(cv.matFromImageData(preprocessed));
+      const gray = track(new cv.Mat());
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-    // Step 1: Grayscale
-    const gray = track(new cv.Mat());
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      // Light blur removes sharpening noise without losing dot edges
+      const blurred = track(new cv.Mat());
+      cv.GaussianBlur(gray, blurred, new cv.Size(3, 3), 0.8);
 
-    // Step 2: CLAHE — local contrast enhancement
-    const enhanced = track(new cv.Mat());
-    const clahe    = new cv.CLAHE(2.0, new cv.Size(8, 8));
-    clahe.apply(gray, enhanced);
-    clahe.delete();
+      // Otsu + INV: dot shadows are darker than background after preprocessing
+      const binary = track(new cv.Mat());
+      cv.threshold(blurred, binary, 0, 255, cv.THRESH_BINARY_INV | cv.THRESH_OTSU);
 
-    // Step 3: Gaussian blur to reduce noise
-    const blurred = track(new cv.Mat());
-    cv.GaussianBlur(enhanced, blurred, new cv.Size(5, 5), 1.5);
+      // Larger kernel removes noise introduced by aggressive unsharp masking
+      const kernel  = track(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5)));
+      const cleaned = track(new cv.Mat());
+      cv.morphologyEx(binary, cleaned, cv.MORPH_OPEN, kernel);
 
-    // Step 4: Otsu threshold — inverted (dark dots on light background)
-    const binary = track(new cv.Mat());
-    cv.threshold(blurred, binary, 0, 255, cv.THRESH_BINARY_INV | cv.THRESH_OTSU);
+      const contours  = track(new cv.MatVector());
+      const hierarchy = track(new cv.Mat());
+      cv.findContours(cleaned, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-    // Step 5: Morphological opening to remove small noise blobs
-    const kernel  = track(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3)));
-    const cleaned = track(new cv.Mat());
-    cv.morphologyEx(binary, cleaned, cv.MORPH_OPEN, kernel);
+      // Lower circularity threshold: shadow-based blobs are less perfectly round
+      return _extractDots(cv, contours, imageData, 0.25);
 
-    // Step 6: Find external contours
-    const contours  = track(new cv.MatVector());
-    const hierarchy = track(new cv.Mat());
-    cv.findContours(cleaned, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    } else {
+      // ── NON-EMBOSSED PATH (original pipeline) ──────────────────────────────
+      const src = track(cv.matFromImageData(imageData));
+      const gray = track(new cv.Mat());
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-    const imgArea  = imageData.width * imageData.height;
-    const minArea  = Math.max(4,   imgArea * 0.00005);
-    const maxArea  = Math.max(800, imgArea * 0.04);
+      const enhanced = track(new cv.Mat());
+      const clahe    = new cv.CLAHE(2.0, new cv.Size(8, 8));
+      clahe.apply(gray, enhanced);
+      clahe.delete();
 
-    const dots = [];
-    for (let i = 0; i < contours.size(); i++) {
-      const contour = contours.get(i);
-      const area    = cv.contourArea(contour);
+      const blurred = track(new cv.Mat());
+      cv.GaussianBlur(enhanced, blurred, new cv.Size(5, 5), 1.5);
 
-      if (area < minArea || area > maxArea) { contour.delete(); continue; }
+      const binary = track(new cv.Mat());
+      cv.threshold(blurred, binary, 0, 255, cv.THRESH_BINARY_INV | cv.THRESH_OTSU);
 
-      // Step 7: Circularity filter  (4π·A / P²) — keep ≥ 0.35 for round dots
-      const perimeter = cv.arcLength(contour, true);
-      if (perimeter === 0) { contour.delete(); continue; }
-      const circularity = (4 * Math.PI * area) / (perimeter * perimeter);
-      if (circularity < 0.35) { contour.delete(); continue; }
+      const kernel  = track(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3)));
+      const cleaned = track(new cv.Mat());
+      cv.morphologyEx(binary, cleaned, cv.MORPH_OPEN, kernel);
 
-      // Centroid via moments
-      const moments = cv.moments(contour);
-      if (moments.m00 === 0) { contour.delete(); continue; }
-      const cx = moments.m10 / moments.m00;
-      const cy = moments.m01 / moments.m00;
-      const radius = Math.sqrt(area / Math.PI);
+      const contours  = track(new cv.MatVector());
+      const hierarchy = track(new cv.Mat());
+      cv.findContours(cleaned, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-      dots.push({ x: cx, y: cy, radius, confidence: Math.min(1, circularity) });
-      contour.delete();
+      return _extractDots(cv, contours, imageData, 0.35);
     }
-
-    return dots;
 
   } finally {
     mats.forEach(m => { try { if (m && !m.isDeleted?.()) m.delete(); } catch {} });
@@ -360,35 +404,39 @@ export function assessImageQuality(imageData) {
 /**
  * Detect Braille dots in a ROI ImageData.
  *
- * PRIMARY path (when OpenCV.js is loaded):
- *   1. Grayscale → CLAHE contrast → Gaussian blur
- *   2. cv.threshold (Otsu, inverted) — dark dots on light background
- *   3. Morphological opening — remove noise
- *   4. cv.findContours → filter by area + circularity ≥ 0.35
+ * Automatically detects embossed (white-on-white, mean > 150) vs. printed
+ * Braille and applies the appropriate pipeline for each case.
+ *
+ * PRIMARY path (OpenCV.js loaded) — see _detectDotsOpenCV() for details:
+ *   Embossed:     preprocessForBraille → GaussianBlur(3,3) → Otsu INV → MorphOpen(5×5)
+ *   Non-embossed: CLAHE → GaussianBlur(5,5) → Otsu INV → MorphOpen(3×3)
  *
  * FALLBACK (Canvas API, no OpenCV):
- *   Adaptive local threshold + connected-component blob analysis.
+ *   preprocessForBraille + adaptive local threshold + flood-fill blob analysis.
  *
  * @param {ImageData} imageData
  * @returns {{ dots: Array<{x,y,radius,confidence}>, confidence: number, preprocessedImage: ImageData }}
  */
 export function detectBrailleDots(imageData) {
+  // Determine embossed state once so both paths use the same decision.
+  const { embossed } = _quickEmbossCheck(imageData);
+
   // ── PRIMARY: OpenCV dot detection ────────────────────────────────────────
   if (_opencvReady && _cv) {
     try {
-      const dots = _detectDotsOpenCV(imageData);
+      const dots = _detectDotsOpenCV(imageData, embossed);
       if (dots.length > 0) {
         const confidence = dots.reduce((s, d) => s + d.confidence, 0) / dots.length;
         return { dots, confidence, preprocessedImage: imageData };
       }
       // OpenCV returned 0 dots — fall through to Canvas path below
+      console.warn('[BrailleDetector] OpenCV found 0 dots (embossed=' + embossed + '), trying Canvas fallback');
     } catch (err) {
       console.warn('[BrailleDetector] OpenCV detection failed, using Canvas fallback:', err.message);
     }
   }
 
   // ── FALLBACK: Canvas adaptive-threshold + blob analysis ──────────────────
-  const { embossed } = _quickEmbossCheck(imageData);
   const processed    = preprocessForBraille(imageData, embossed);
 
   const w = processed.width, h = processed.height;
