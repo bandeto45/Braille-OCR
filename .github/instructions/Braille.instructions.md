@@ -79,10 +79,10 @@ npm run cordova-ios    # Full build + run on iOS device
 state: {
   // Detection
   lastDetectedText: '',
-  detectionHistory: [],   // Last 50 detections
+  detectionHistory: [],   // Last 50 detections { text, confidence, braille, timestamp }
   isDetecting: false,
   confidence: 0,
-  templatesLoaded: false, // true once all 26 template PNGs are loaded by initializeDetector()
+  templatesLoaded: false, // true once initializeDetector() resolves in preloader
   opencvInitialized: false,
   opencvLoading: false,
   // Camera
@@ -103,7 +103,7 @@ state: {
 
 ## Detection Pipeline (Template-Photo OCR Implementation)
 
-All pages use `simple-braille-detector.js` (Canvas API only, no external CV library). Recognition is driven by **26 pre-captured Braille character reference photos** stored in `src/assets/braille-templates/`. Each detected cell region from the live frame or uploaded image is matched against all 26 templates via pixel-level similarity to identify its character. The complete pipeline extracts **all Braille codes** present—spanning one or more rows—and assembles them into a full sentence.
+All pages use `simple-braille-detector.js` (Canvas API only, no external CV library). Recognition is driven by **26 pre-captured Braille character reference photos** stored in `src/assets/braille-templates/`. Each detected cell region is binarized (Otsu threshold) then matched against all 26 binarized templates via Normalised Cross-Correlation. The best match must beat the second-best by `MIN_NCC_MARGIN = 0.02` to be accepted. The complete pipeline extracts **all Braille codes** present—spanning one or more rows—and assembles them into a full sentence. Missing template photos automatically fall back to synthetic dot-pattern images.
 
 ### 26 Template Reference Photos
 
@@ -120,28 +120,41 @@ Each template photo:
 
 ### Template Loading & Initialisation (`initializeDetector`)
 
+Templates are loaded via **Vite `import.meta.glob()`** — not individual static imports. The glob resolves URLs for all `.jpg`, `.jpeg`, and `.png` files in `src/assets/braille-templates/`. For each character in `TEMPLATE_CHARS` the loader tries multiple filename variants in priority order:
+
+```
+A.jpg → a.jpg → A.jpeg → a.jpeg → A.png → a.png
+```
+
+After loading, **Otsu binarization** is applied to every template. Each camera-extracted cell is binarized the same way before NCC comparison. The binary representation (black dots on white background) makes NCC invariant to lighting, embossing depth, and camera exposure. An **inversion guard** flips pixels when >60% are dark (white-dot-on-dark-paper convention).
+
+If a real photo is **missing** for a character, a **synthetic dot-pattern template** is auto-generated on a canvas using the `CHAR_DOT_PATTERNS` masks — so detection works even without all 26 real photos.
+
 ```javascript
-// src/js/detection/simple-braille-detector.js
-import templateA from '../../assets/braille-templates/a.png';
-// ... repeat for all 26 files (b.png … z.png)
+// Vite glob import — resolves URLs for all template image files
+const TEMPLATE_URLS = import.meta.glob(
+  [
+    '../../assets/braille-templates/*.jpg',
+    '../../assets/braille-templates/*.jpeg',
+    '../../assets/braille-templates/*.png',
+  ],
+  { eager: true, query: '?url', import: 'default' }
+);
 
-const TEMPLATE_MAP = {
-  a: templateA, b: templateB, /* … */ z: templateZ,
-};
-
-const TEMPLATE_SIZE = { w: 64, h: 96 };  // canonical cell canvas size
-
-let templateImageData = {};  // char -> ImageData (normalised grayscale)
+// Exported status flags (read by preloader.f7)
+export let templatesAreSynthetic = false;   // true when ALL 26 are synthetic
+export let templatesMissingCount = 0;       // count of chars using synthetic fallback
 
 export async function initializeDetector() {
-  for (const [char, src] of Object.entries(TEMPLATE_MAP)) {
-    const img = await loadImage(src);
-    templateImageData[char] = renderToGrayscaleImageData(img, TEMPLATE_SIZE.w, TEMPLATE_SIZE.h);
-  }
+  // For each TEMPLATE_CHAR: find URL via glob, loadImage(), renderToGrayscaleImageData(),
+  // then _otsuBinarize() → stored in templateImageData[char].
+  // On miss: generateSyntheticTemplate(ch) → _otsuBinarize() as fallback.
 }
 
-// loadImage(src)  -> Promise<HTMLImageElement>
-// renderToGrayscaleImageData(img, w, h) -> ImageData (grayscale via luminance)
+// _otsuBinarize(gs: ImageData) -> ImageData  (0 = dot, 255 = background)
+// generateSyntheticTemplate(ch: string) -> ImageData  (dot pattern drawn on canvas)
+// loadImage(src) -> Promise<HTMLImageElement>
+// renderToGrayscaleImageData(img, w, h) -> ImageData (R=G=B=luma)
 ```
 
 ### Step-by-step pipeline in `camera.f7` and `home.f7`:
@@ -178,12 +191,12 @@ export async function initializeDetector() {
    -> matchedCells: [{ char, confidence, rowIndex, colIndex }]
    For each cell region:
      a. Extract cell ImageData from ROI, resize to TEMPLATE_SIZE (64 × 96 px) via bilinear scaling.
-     b. Convert to grayscale ImageData.
-     c. For each of the 26 templateImageData entries compute NCC (Normalised Cross-Correlation):
+     b. Convert to grayscale → apply Otsu binarization (_otsuBinarize).
+     c. For each of the 26 binarized templateImageData entries compute NCC:
           ncc = Σ( (A[i] - meanA)(B[i] - meanB) ) / (stdA × stdB × N)
-     d. Best template character = argmax(ncc).
+     d. Best template = argmax(ncc). Accept only if best beats 2nd-best by MIN_NCC_MARGIN (0.02).
      e. confidence = (ncc + 1) / 2  (mapped from [-1,1] to [0,1]).
-     f. If best confidence < MIN_TEMPLATE_CONFIDENCE (0.40) -> char = '?' (unrecognised).
+     f. If confidence < MIN_TEMPLATE_CONFIDENCE (0.42) -> char = '?' (unrecognised).
 
 8. assembleSentence(matchedCells)
    -> { text: string, confidence: number, charCount: number }
@@ -244,41 +257,56 @@ The `scanningStatus` string updates each frame and displays in the centre guide 
 ### Permission Flow
 ```
 $onMounted()
-  |-- waitForCordova()          [2s timeout if deviceready doesn't fire]
-       |-- requestCamera()
-            |-- requestCameraPermission()
+  |
+  +-- waitForCordova()          [2 s timeout if deviceready doesn't fire]
+       |
+       +-- requestCamera()
+            |
+            +-- requestCameraWithPermission(constraints)
                  |-- Android (Cordova): cordova.plugins.permissions.requestPermissions([CAMERA])
-                 |-- Web/iOS fallback: requestCameraPermissionFallback()
-                      |-- navigator.mediaDevices.getUserMedia() -> test stream -> stop tracks
-            |-- getUserMediaWithTimeout(constraints, 10000)   [10s timeout]
-            |-- videoEl.srcObject = stream
-            |-- videoEl.play() after 200ms delay
-            |-- startProcessing() after 500ms delay
+                 |-- Web/iOS: _queryCameraPermission() via Permissions API
+                 |     -> 'denied'  => return null (skip getUserMedia)
+                 |     -> 'granted'|'prompt'|'unknown' => fall through
+                 +-- navigator.mediaDevices.getUserMedia(constraints)
+                     with 15 s timeout via Promise.race
+            |
+            +-- videoEl.srcObject = stream; videoEl.load()
+            +-- _playVideoWhenReady(videoEl)
+                 |-- waits for 'loadedmetadata' | 'canplay' events
+                 |-- fallback: el.load() + play() after 2 s
+                 |-- ultimate safety: resolves after 5 s regardless
+            |
+            +-- isLoading = false; $store.dispatch('setCameraActive', true); $update()
+            +-- requestAnimationFrame -> re-attach srcObject if vDOM replaced <video>
+            +-- setTimeout(() => startProcessing(), 500)
 ```
 
 ### Video Element Setup (Android WebView compatibility)
 ```javascript
 videoEl.muted = true;
-videoEl.playsInline = true;
-videoEl.autoplay = true;
+videoEl.setAttribute('muted', '');
 videoEl.setAttribute('playsinline', 'true');
 videoEl.setAttribute('webkit-playsinline', 'true');
-// Force explicit dimensions for Android WebView
-videoEl.width = 1280;
-videoEl.height = 720;
+videoEl.setAttribute('autoplay', 'true');
+videoEl.playsInline = true;
+videoEl.autoplay    = true;
+// CSS handles all sizing — do NOT set videoEl.width / videoEl.height
 videoEl.style.objectFit = 'cover';
-videoEl.style.position = 'absolute';
+// Assign stream and force Android WebView to process it:
+videoEl.srcObject = stream;
+videoEl.load();  // Critical for Android WebView — triggers source processing
 ```
 
 ### MediaDevices Constraints
 ```javascript
 {
   video: {
-    facingMode: 'environment',   // Back camera default
-    width: { ideal: 1280 },
-    height: { ideal: 720 }
-  }
+    facingMode: { ideal: facingMode },  // 'ideal' = preference, not mandatory
+    width:  { ideal: 1280 },
+    height: { ideal: 720  },
+  },
 }
+// Note: mandatory facingMode can fail silently on some Android WebViews.
 ```
 
 ### Camera Controls
@@ -368,10 +396,9 @@ cd cordova && cordova build android
 src/
 |-- app.f7                    # Root app component - single <div id="app"> with main view
 |-- index.html                # Entry HTML
-|-- test-detection.html       # Standalone detection test page
 |-- assets/
-|   |-- braille/              # Test Braille image assets (full-document scans)
-|   |-- braille-templates/    # 26 reference template photos (64x96 px each)
+|   |-- braille-originals/    # Original reference JPGs (A.jpg – Z.jpg) — not loaded at runtime
+|   |-- braille-templates/    # 26 active template PNGs (a.png – z.png at 64×96 px)
 |   |   |-- a.png  b.png  c.png  d.png  e.png  f.png  g.png
 |   |   |-- h.png  i.png  j.png  k.png  l.png  m.png  n.png
 |   |   |-- o.png  p.png  q.png  r.png  s.png  t.png  u.png
@@ -398,21 +425,22 @@ src/
 |   |   |-- simple-braille-detector.js  # PRIMARY: Template-photo OCR detector
 |   |   |                               # exports: assessImageQuality, detectBrailleDots,
 |   |   |                               #          segmentCellRegions, matchCellsToTemplates,
-|   |   |                               #          assembleSentence, initializeDetector
+|   |   |                               #          assembleSentence, initializeDetector,
+|   |   |                               #          templatesAreSynthetic, templatesMissingCount
 |   |   |-- braille-detector.js         # ALTERNATIVE: OpenCV.js detector (not active)
-|   |                                   # exports: initializeOpenCV, detectBrailleDots, groupIntoCells
 |   |-- processing/
-|   |   |-- image-enhance.js  # increaseContrast(), adjustBrightness(), preprocessForBraille()
-|   |   |-- template-loader.js  # loadAllTemplates(), renderToGrayscaleImageData(), computeNCC()
+|   |   |-- image-enhance.js  # increaseContrast(), adjustBrightness(), unsharpMask(), preprocessForBraille()
+|   |   |-- template-loader.js  # loadImage(), renderToGrayscaleImageData(), computeNCC(), resizeImageData()
 |   |-- recognition/
-|   |   |-- pattern-matcher.js  # recognizeBrailleCells(), processDetectionResult(), findConsistentResult()
+|   |   |-- pattern-matcher.js  # recognizeBrailleCells(), processDetectionResult(),
+|   |   |                       # findConsistentResult(), isLikelyGibberishText()
 |   |-- utils/
-|       |-- braille-mappings.js  # TEMPLATE_CHARS (26-char set), grade1Mapping, brailleToText(),
-|       |                        # createBrailleFromDots(), isValidBraille(), charToTemplateName()
+|       |-- braille-mappings.js  # TEMPLATE_CHARS, CHAR_DOT_PATTERNS, DOT_PATTERN_TO_CHAR,
+|       |                        # grade1Mapping, brailleToText(), createBrailleFromDots(), etc.
 |       |-- throttle.js          # throttle(), debounce(), createStabilityChecker()
 |-- pages/
     |-- preloader.f7   # Splash + async template loading (initializeDetector) -> /home/
-    |-- home.f7        # Main menu + photo upload feature
+    |-- home.f7        # Main menu + photo upload + crop + permissions + history
     |-- camera.f7      # Live scanning (full template-OCR pipeline)
     |-- settings.f7    # App settings (sensitivity, dark mode, text size, TTS, sound)
     |-- about.f7       # App info
@@ -470,16 +498,23 @@ const app = new Framework7({
 
 ### Cell Structure
 ```
-Dot layout (2×3 grid):
-  Col1  Col2
-  1     2    <- row 1
-  3     4    <- row 2
-  5     6    <- row 3
+Dot layout (2×3 grid — standard Braille numbering):
+  Col1 (left)  Col2 (right)
+      1            4        ← row 1 (top)
+      2            5        ← row 2 (mid)
+      3            6        ← row 3 (bot)
+
+bit 0 = dot 1 · bit 1 = dot 2 · bit 2 = dot 3
+bit 3 = dot 4 · bit 4 = dot 5 · bit 5 = dot 6
 ```
 
 ### Key Functions
 ```javascript
 TEMPLATE_CHARS           // Array of 26 chars: ['a','b',...,'z']
+CHAR_DOT_PATTERNS        // { a: 0b000001, b: 0b000011, ... }  char -> 6-bit dot mask
+                         // bit 0=dot1(L-top), 1=dot2(L-mid), 2=dot3(L-bot)
+                         // bit 3=dot4(R-top), 4=dot5(R-mid), 5=dot6(R-bot)
+DOT_PATTERN_TO_CHAR      // Map<number, string>  6-bit pattern -> char (letters beat digits)
 charToTemplateName(ch)   // e.g. 'a' -> 'a.png'
 grade1Mapping            // { '\u2801': 'a', ... }  Braille Unicode -> text char
 textToBraille            // { 'a': '\u2801', ... }  text char -> Braille Unicode (reverse map)
@@ -495,15 +530,19 @@ createBrailleFromDots(dotNumbers[])  // e.g. [1,2] -> '\u2803' (b)
 
 ### Confidence Thresholds
 ```javascript
-MIN_TEMPLATE_CONFIDENCE  = 0.40;  // NCC score mapped to [0,1]; below this -> '?' (unrecognised)
-MIN_CELL_CONFIDENCE      = 0.42;  // Used when falling back to dot-pattern matching
+MIN_TEMPLATE_CONFIDENCE  = 0.42;  // NCC confidence mapped to [0,1]; below this -> '?' (unrecognised)
+MIN_CELL_CONFIDENCE      = 0.42;  // Used in recognizeBrailleCells fallback check
 MIN_RECOGNIZED_RATIO     = 0.34;  // Fraction of cells that must be recognised in a result
+// (in simple-braille-detector.js)
+MIN_NCC_MARGIN           = 0.02;  // Best NCC must beat 2nd-best by this margin
 ```
 
 ### Key Functions
 ```javascript
 matchCellsToTemplates(roiData, cellRegions)
-  // For each cellRegion: extract -> resize to 64x96 -> grayscale -> NCC against all 26 templates
+  // For each cellRegion: extract -> resize to 64x96 -> grayscale -> _otsuBinarize
+  // -> NCC against all 26 binarized templates
+  // Best match must exceed 2nd-best by MIN_NCC_MARGIN
   // -> matchedCells: [{ char, confidence, rowIndex, colIndex }]
 
 assembleSentence(matchedCells)
@@ -520,17 +559,27 @@ processDetectionResult(matchedCells, minConfidence = 0.45)
 findConsistentResult(recentResults[], requiredMatches = 3)
   // Groups by text, finds majority result, requires >= requiredMatches
   // -> { text, confidence, braille } | null
+
+isLikelyGibberishText(text, matchedCells)
+  // Returns true if result looks like noise/random characters.
+  // Checks: >50% unrecognised cells, avg confidence <0.25, word-length
+  // distribution anomalies, excessive space/char ratio.
+  // -> boolean
 ```
 
 ### Template Matching — NCC Algorithm
-For each cell candidate vs each template:
+Both the cell and the template are **Otsu-binarized** before NCC. This makes comparison purely structural (dot positions only), invariant to lighting and embossing depth:
 ```javascript
-// A = cell ImageData (grayscale, 64x96)
-// B = template ImageData (grayscale, 64x96)
+// A = binarized cell ImageData (64×96, 0=dot, 255=bg)
+// B = binarized template ImageData (64×96, 0=dot, 255=bg)
 ncc = Σ( (A[i] - meanA)(B[i] - meanB) ) / (stdA × stdB × N)
 confidence = (ncc + 1) / 2   // maps [-1,1] -> [0,1]
 ```
-Best match is `argmax(confidence)` across all 26 templates. If `confidence < MIN_TEMPLATE_CONFIDENCE` the cell is marked `'?'`.
+Best match is `argmax(confidence)`. Accepted only if:
+- `confidence >= MIN_TEMPLATE_CONFIDENCE (0.42)` AND
+- `best_ncc - second_best_ncc >= MIN_NCC_MARGIN (0.02)`
+
+Otherwise cell is marked `'?'`.
 
 ## Sentence Assembly Rules
 1. Characters ordered left-to-right within each detected row.
@@ -550,23 +599,21 @@ Responsible for loading all 26 reference photos at startup and producing normali
 ```javascript
 loadImage(src)
   // -> Promise<HTMLImageElement>
-  // Creates an <img> element, sets .src, resolves on 'load', rejects on 'error'
 
 renderToGrayscaleImageData(img, w, h)
-  // -> ImageData (w × h, single luminance channel stored as RGBA where R=G=B=luma)
-  // Draws img onto off-screen canvas scaled to w×h, then converts RGBA -> grayscale via:
-  //   luma = 0.299*R + 0.587*G + 0.114*B
+  // -> ImageData (w × h, R=G=B=luma via 0.299R+0.587G+0.114B)
 
 computeNCC(dataA, dataB)
-  // dataA, dataB: Uint8ClampedArray (same length, grayscale RGBA)
-  // -> number in [-1, 1]
-  // ncc = Σ( (A[i]-meanA)(B[i]-meanB) ) / ( stdA × stdB × N )
-  // Returns 0 if either std deviation is 0 (flat image)
+  // dataA, dataB: same-length grayscale RGBA Uint8ClampedArrays
+  // -> number in [-1, 1]  (returns 0 if either std dev is 0)
+
+resizeImageData(imageData, targetW, targetH)
+  // Bilinear interpolation resize of any RGBA ImageData.
+  // -> ImageData at targetW × targetH
 
 loadAllTemplates(templateMap, targetW, targetH)
-  // templateMap: { char: importedSrc, ... }  (26 entries)
+  // templateMap: { char: importedSrc, ... }
   // -> Promise<{ [char: string]: ImageData }>
-  // Resolves when all 26 images are loaded and converted
 ```
 
 ### Canonical Template Size
@@ -588,32 +635,103 @@ Returns: `{ isAcceptable: boolean, score: 0-1, summary: string, advice: string, 
 | Contrast | 15% | Pixel standard deviation |
 | Tilt | 15% | Gradient orientation coherence |
 
-**Embossed Braille**: `mean > 150 && stdDev < 38` - treated as valid (white-on-white raised dots), not penalized for low contrast or high brightness.
+**Embossed Braille**: `mean > 150 && stdDev < 38` - treated as valid (white-on-white raised dots). Score is forced to `0.7` regardless of blur/contrast/tilt sub-scores.
 
 ---
 
-## Home Page - Photo Upload Feature (`home.f7`)
+## Image Enhancement (`src/js/processing/image-enhance.js`)
 
-In addition to the "Start Scanning" button, the home page has a photo upload option:
+### Key Functions
+```javascript
+increaseContrast(imageData, factor = 1.5)
+  // Linear stretch around mid=128 — boosts contrast for printed Braille
+  // -> ImageData
+
+adjustBrightness(imageData, value = 20)
+  // Adds fixed value to each channel (positive = brighter)
+  // -> ImageData
+
+unsharpMask(imageData, amount = 2.5, blurRadius = 5)
+  // Separable box-blur then: sharpened = clamp(original + amount × (original − blurred))
+  // Critical for embossed Braille: amplifies dot-shadow micro-gradients so
+  // adaptive threshold fires reliably on barely-raised dots.
+  // -> ImageData (grayscale)
+
+preprocessForBraille(imageData, isEmbossed = false)
+  // Full pipeline:
+  //   1. RGB → grayscale float array
+  //   2a. Embossed path: global percentile stretch [p2, p98] → [0, 255]
+  //                      then unsharpMask(amount=2.5, radius=5)
+  //   2b. Non-embossed:  increaseContrast(factor=1.5)
+  // -> ImageData (grayscale)
+```
+
+---
+
+## Home Page (`home.f7`)
+
+### Photo Upload Feature
+In addition to "Start Scanning", the home page has a photo upload option:
 ```html
 <button @click=${triggerPhotoPicker}>Upload Photo to Text</button>
-<input type="file" accept="image/*" @change=${handlePhotoUpload} />
+<input type="file" accept="image/*" @change=${handlePhotoUpload} id="photo-upload-input" />
 ```
-Processing: load image → draw to canvas → full template-OCR pipeline:
+Processing: load image → **interactive crop step** → draw cropped area to canvas → full template-OCR pipeline:
 `assessImageQuality()` → `detectBrailleDots()` → `segmentCellRegions()` → `matchCellsToTemplates()` → `assembleSentence()`
 
-The uploaded photo may contain **multiple Braille characters and multiple rows**. All detected characters are assembled into a complete sentence before display.
+After pipeline: `isLikelyGibberishText()` is called — if the result looks like noise it is discarded.
 
-Results displayed inline showing the full decoded sentence with overall confidence percentage. Errors shown in a red error card.
+Results show the full decoded sentence, confidence %, char count, and a **Braille dot-pattern grid** for each matched cell (rendered via `getDisplayDots(char)` + `CHAR_DOT_PATTERNS`).
+
+Errors shown in a red error card with `error_outline` icon.
+
+### Crop Feature
+After a photo is chosen, the user is taken into a full-screen crop UI before analysis:
+
+```javascript
+// Crop state variables
+let cropActive  = false;    // true = crop overlay is visible
+let cropImgEl   = null;     // HTMLImageElement of the chosen photo
+let cropNatW, cropNatH;     // natural (original) image dimensions
+// Crop rectangle in normalised image-space [0..1]
+let cropNX = 0.03, cropNY = 0.03, cropNW = 0.94, cropNH = 0.94;
+// Corner drag handles (hit-radius 30 px, visual dot radius 9 px)
+let _cropDragMode  = null;  // null | 'move' | 'tl' | 'tr' | 'bl' | 'br'
+```
+
+- Canvas stretches to fill the screen (`flex:1`); bound via `touch-action:none` for drag.
+- Corners are draggable handles (30 px hit radius); interior drag moves the whole rectangle.
+- "Analyse →" button commits the crop and runs the OCR pipeline.
+- "Cancel" button discards and returns to normal home view.
+
+### Permission Cards
+The home page shows live permission status cards for camera and audio:
+
+```javascript
+let cameraPermission = 'unknown';  // 'unknown' | 'granted' | 'denied' | 'prompt'
+let audioPermission  = 'unknown';
+```
+
+Each card shows a colour-coded icon (green=granted, red=denied, yellow=prompt/unknown) and a
+tap target that opens system settings or triggers the permission request.
+
+### History List
+The last 5 items from `$store.getters.detectionHistory` are shown in a media list. Tapping an item copies the text to clipboard.
 
 ---
 
 ## Preloader Page (`preloader.f7`)
-- Calls `initializeDetector()` from `simple-braille-detector.js` — **async**: loads all 26 template PNG images into off-screen canvases and builds `templateImageData` map
-- Animates progress bar 0→100% in 20% increments per 100 ms (progress tied to template loading callbacks)
-- Sets `$f7.data.detectorReady = true` only after the `initializeDetector()` promise resolves
-- Navigates to `/home/` after 300 ms when complete
-- Shows retry button on error (e.g. a template file failed to load)
+- Calls `initializeDetector()` from `simple-braille-detector.js` — **async**: attempts to load all 26 template PNG images via glob. Falls back to synthetic dot-pattern images for any missing files.
+- Animates progress bar 0→80% during loading (20% per 100 ms tick), then jumps to 100% on resolve.
+- Sets `$f7.data.detectorReady = true` after the promise resolves.
+- Shows a **yellow warning banner** (`synthWarning`) when `templatesMissingCount > 0`, listing how many characters use synthetic fallbacks and prompting the user to add the missing PNG files.
+- Status text variants:
+  - `'Ready!'` — all 26 real photos loaded
+  - `'Ready (N synthetic)'` — N chars use fallback
+  - `'Ready (synthetic templates)'` — all 26 are synthetic
+  - `'Failed to load templates.'` — unexpected error
+- Navigates to `/home/` after **1800 ms** when `synthWarning` is true, otherwise **300 ms**.
+- Shows retry button on error.
 
 ---
 
@@ -632,24 +750,26 @@ Results displayed inline showing the full decoded sentence with overall confiden
 ### Local State Variables
 ```javascript
 let cameraAvailable = true;
-let detectedText = '';
-let confidence = 0;
-let flashlightOn = false;
-let grayscaleOn = false;
-let stream = null;                  // MediaStream
-let facingMode = 'environment';     // 'environment' | 'user'
-let processingInterval = null;      // setInterval handle
-let videoEl = null;                 // <video> DOM reference
-let cordovaReady = false;
-let isLoading = true;
-let loadingMessage = 'Initializing...';
-let detectorReady = true;           // simple detector is always ready
-let scanningStatus = 'Position Braille in center guide';
-let recentRecognitionResults = [];  // Rolling buffer, max 6 entries
-let activeDetectionDialog = null;   // Only one dialog at a time
-let isDetectionPaused = false;      // True while dialog is open
-const ALERT_COOLDOWN_MS = 30000;    // 30s cooldown per unique message
-const messageAlertHistory = new Map();  // text -> last alert timestamp
+let detectedText    = '';
+let confidence      = 0;
+let flashlightOn    = false;
+let grayscaleOn     = false;
+let stream          = null;                  // MediaStream
+let facingMode      = 'environment';         // 'environment' | 'user'
+let processingInterval = null;               // setInterval handle
+let videoEl         = null;                  // <video> DOM reference
+let cordovaReady    = false;
+let isLoading       = true;
+let loadingMessage  = 'Initializing...';
+let detectorReady   = true;                  // simple detector is always ready
+let scanningStatus  = 'Position Braille in centre guide';  // UK spelling
+let debugInfo       = '';                    // shown in debug overlay (top-left)
+let recentRecognitionResults = [];           // Rolling buffer, max 6 entries
+let activeDetectionDialog    = null;         // Only one dialog at a time
+let isDetectionPaused        = false;        // True while dialog is open
+
+const ALERT_COOLDOWN_MS   = 30000;           // 30 s cooldown per unique message
+const messageAlertHistory = new Map();       // text -> last alert timestamp
 ```
 
 ### Imports Used
@@ -667,16 +787,15 @@ import { throttle } from '../js/utils/throttle.js';
 ```
 
 ### Camera Page UI Elements
-- **Loading overlay**: absolute position, `rgba(0,0,0,0.85)`, preloader + message, z-index 100
-- **`<video>` element**: `id="camera-video"`, `autoplay playsinline muted`, optional grayscale CSS filter
-- **Center guide**: crosshairs (`.braille-guide-crosshair-h/v`), title "Align one Braille line inside this box", hint "Keep rows level and centered"
-- **Scanning status pill**: below center guide, shows `scanningStatus` (hidden when text detected)
-- **Detected message box**: 52% from top, semi-transparent dark bg, `border: 2px solid var(--braille-primary)`, slideUp animation
-- **Camera controls row**: flashlight, flip camera, grayscale toggle - icon buttons
-- **Detected text overlay**: below the camera view, with speak + copy buttons
-- **Debug overlay**: top-left corner, shows video dimensions / readyState / stream / detector / processing state, `pointer-events: none`
-- **Empty state**: shown when `!cameraAvailable` - "Camera Access Required" with enable button
-- **10s force-hide loading failsafe**: `setTimeout(() => { isLoading = false; $update(); }, 10000)`
+- **Loading overlay**: absolute position, `rgba(0,0,0,0.85)`, green preloader + message, z-index 100
+- **Back button**: top-left, links to `/home/`, uses `.camera-control-btn` style
+- **`<video>` element**: `id="camera-video"`, `autoplay playsinline muted`, optional `filter:grayscale(100%)` CSS
+- **Debug overlay**: top-left (z-index 60), shows `debugInfo` (video dimensions, readyState, etc.), `pointer-events:none`, monospace font
+- **Centre guide box** (`.braille-guide-box`): 80% wide × 40% tall, green border, crosshairs (`.braille-guide-crosshair-h/v`), label "Align one Braille line inside this box" / "Keep rows level and centred"
+- **Scanning status pill** (`.scanning-status-pill`): shows `scanningStatus`, hidden when `detectedText` is truthy
+- **Detected text overlay**: commented out in template (was at `top:52%`)
+- **Camera controls row**: bottom of screen, flashlight / flip camera / grayscale toggle buttons
+- **Camera unavailable state**: shown when `!cameraAvailable && !isLoading`
 
 ### Detection Alert Dialog
 ```javascript
@@ -720,14 +839,27 @@ if (isNewText && navigator.vibrate) navigator.vibrate(100);
 ### CSS Variables (`:root`)
 ```css
 --f7-theme-color: #4CAF50;
---braille-primary: #4CAF50;
---braille-accent:  #FF5722;
---braille-secondary: #232B2B;
---braille-bg:      #FFFFFF;
+--braille-primary:   #4CAF50;   /* green – success / detected */
+--braille-accent:    #FF5722;   /* red   – errors / alerts    */
+--braille-secondary: #232B2B;   /* dark charcoal               */
+--braille-bg:        #FFFFFF;
+
+/* Semantic colours */
 --braille-success: #4CAF50;
 --braille-warning: #FFC107;
 --braille-error:   #F44336;
 --braille-info:    #2196F3;
+
+/* Component variables */
+--navbar-bg:    #FFFFFF;
+--card-bg:      #FFFFFF;
+--border-color: rgba(0,0,0,0.08);
+--shadow-sm:    0 2px 8px rgba(0,0,0,0.08);
+--shadow-md:    0 4px 16px rgba(0,0,0,0.12);
+--radius-sm:    8px;
+--radius-md:    12px;
+--radius-lg:    16px;
+--radius-xl:    24px;
 
 /* Golden Ratio Typography (Base: 16px, Scale x1.618) */
 --font-xs: 10px;  --font-sm: 13px;  --font-base: 16px;
@@ -737,14 +869,19 @@ if (isNewText && navigator.vibrate) navigator.vibrate(100);
 /* Golden Ratio Spacing (Base: 8px, Scale x1.618) */
 --space-0: 0px;  --space-1: 8px;   --space-2: 13px;
 --space-3: 16px; --space-4: 21px;  --space-5: 26px;
---space-6: 32px; --space-8: 52px;
+--space-6: 32px; --space-7: 42px;  --space-8: 52px;
 ```
 
 ### Dark Mode
 ```css
 .theme-dark {
-  --braille-bg: #1a1f1f;
-  --braille-secondary: #FFFFFF;
+  --braille-bg:        #1a1f1f;
+  --braille-secondary: #ECEFF1;  /* light gray – NOT pure white */
+  --navbar-bg:         #232B2B;
+  --card-bg:           #263238;
+  --border-color:      rgba(255,255,255,0.08);
+  --shadow-sm:         0 2px 8px rgba(0,0,0,0.30);
+  --shadow-md:         0 4px 16px rgba(0,0,0,0.40);
 }
 /* Cordova iOS height fix */
 .device-cordova.device-ios { height: 100vh; }
@@ -767,8 +904,10 @@ if (isNewText && navigator.vibrate) navigator.vibrate(100);
 
 **Flexbox**
 - `.flex`, `.flex-{col,row}`
+- `.flex-1` (flex: 1), `.flex-wrap`
 - `.items-{start,center,end}`
 - `.justify-{start,center,end,between,around}`
+- `.gap-{1,2,3,4}` (uses `--space-{1,2,3,4}`)
 
 ---
 
@@ -962,9 +1101,17 @@ Always use proper self-closing tag syntax with `/` before the closing `>`.
 | `dark_mode` | Dark mode setting |
 | `text_fields` | Text size setting |
 | `speed` | Detection sensitivity |
-| `center_focus_strong` | Auto-focus setting |
+| `center_focus_strong` | Auto-focus setting / feature card |
 | `wb_sunny` | Flashlight feature card |
 | `chevron_right` | List item arrow |
+| `videocam_off` | Camera unavailable state |
+| `videocam` | Camera permission prompt card |
+| `mic` | Microphone permission card |
+| `mic_off` | Microphone denied card |
+| `check_circle` | Permission granted icon |
+| `error_outline` | Upload error card |
+| `science` | Sample image button |
+| `refresh` | Retry button (preloader) |
 
 **Note**: Material Icons are NOT loaded from Google Fonts CDN - they are self-hosted.
 
@@ -1049,7 +1196,7 @@ import MyComponent from '../components/MyComponent.f7';
 8. **Max 3 levels CSS nesting** — minimise specificity
 9. **Use `$h` for arrays** — always wrap `.map()` in `$h` tagged template literals
 10. **Material Icons only** — never Framework7 Icons
-11. **Import assets via ES6** — never direct paths in `src` attributes; this includes all 26 template PNGs which must be individually imported in `simple-braille-detector.js`
+11. **Import assets via ES6** — never direct paths in `src` attributes. Template PNGs are loaded via **`import.meta.glob()`** in `simple-braille-detector.js` (not individual static imports). All other assets (sample images, etc.) must use ES6 `import`.
 12. **Self-closing void elements** — always include `/>`
 13. **Primary detector is `simple-braille-detector.js` with template-photo OCR** — do not switch to OpenCV (`braille-detector.js`) unless explicitly requested; do not revert to dot-counting-only recognition
 14. **All 26 template images must be loaded before scanning starts** — `initializeDetector()` is async and must fully resolve before any frame is processed; preloader page awaits this promise
