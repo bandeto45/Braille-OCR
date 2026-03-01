@@ -158,10 +158,10 @@ export function preprocessForBraille(imageData, isEmbossed = false) {
       stretched[idx] = stretched[idx + 1] = stretched[idx + 2] = v;
       stretched[idx + 3] = 255;
     }
-    // Unsharp mask: amplify the subtle shadow gradients of raised dots so the
-    // adaptive threshold can fire even when the dot/paper contrast is tiny.
-    // amount=2.5, radius=5 — aggressive enough to reveal embossed micro-shadows.
-    return unsharpMask(new ImageData(stretched, w, h), 2.5, 5);
+    // Unsharp mask: gently amplify dot-shadow gradients without creating
+    // large halos that would bias Otsu/adaptive thresholding.
+    // amount=1.2 (was 2.5) — sufficient edge pop while keeping halo amplitude low.
+    return unsharpMask(new ImageData(stretched, w, h), 1.2, 5);
   }
 
   const out = new Uint8ClampedArray(src.length);
