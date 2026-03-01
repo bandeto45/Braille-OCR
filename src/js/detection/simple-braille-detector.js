@@ -1,52 +1,207 @@
 /**
- * Simple Braille Detector — Canvas API + Template-Photo OCR
+ * Braille Detector — OpenCV.js + Dot Pattern OCR
  *
  * PRIMARY detector for the Braille OCR app.
- * Loads 26 reference template photos (a–z) and uses Normalised
- * Cross-Correlation (NCC) to identify each detected Braille cell.
- * All matched characters across every row are assembled into a full sentence.
+ * Uses OpenCV.js (cv.threshold + cv.findContours) to detect Braille dots,
+ * then groups them into 2×3 Braille cells and maps each cell's 6-bit dot
+ * pattern to a character via BRAILLE_PATTERN_MAP — no template photos needed.
+ *
+ * Pipeline:
+ *   Image → Grayscale → CLAHE contrast → Otsu threshold → findContours
+ *     → circular-blob filter → dot clusters → 6-bit pattern → character
+ *
+ * Dot-position layout (standard Braille 2×3 grid):
+ *   dot 1 (left-top)  │ dot 4 (right-top)
+ *   dot 2 (left-mid)  │ dot 5 (right-mid)
+ *   dot 3 (left-bot)  │ dot 6 (right-bot)
+ *
+ * 6-bit binary string: positions 0–5 = dots 1–6
+ *   "100000" → 'a'  (dot 1 only)
+ *   "110000" → 'b'  (dots 1,2)
+ *   "100100" → 'c'  (dots 1,4) …
+ *
+ * Falls back to Canvas API blob detection when OpenCV.js is not yet loaded.
  *
  * Exports:
- *   initializeDetector()     async — must resolve before processing frames
+ *   initializeDetector()     async — loads OpenCV.js WASM
  *   assessImageQuality(imageData)
  *   detectBrailleDots(imageData)
  *   segmentCellRegions(imageData, dots, estCellW, estCellH)
- *   matchCellsToTemplates(imageData, cellRegions)
+ *   matchCellsToTemplates(imageData, cellRegions)  ← dot-pattern lookup, no NCC
  *   assembleSentence(matchedCells)
- *   groupIntoCells(dots, cellW, cellH)   ← legacy alias
+ *   groupIntoCells(dots, cellW, cellH)             ← legacy alias
  */
 
-import { TEMPLATE_CHARS, CHAR_DOT_PATTERNS, DOT_PATTERN_TO_CHAR } from '../utils/braille-mappings.js';
-import {
-  TEMPLATE_W, TEMPLATE_H,
-  computeNCC, resizeImageData, renderToGrayscaleImageData, loadImage,
-} from '../processing/template-loader.js';
+import { BRAILLE_PATTERN_MAP, CHAR_DOT_PATTERNS, DOT_PATTERN_TO_CHAR } from '../utils/braille-mappings.js';
 import { preprocessForBraille } from '../processing/image-enhance.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const MIN_TEMPLATE_CONFIDENCE = 0.42;  // NCC confidence threshold
-const MIN_NCC_MARGIN          = 0.02;  // best NCC must beat 2nd-best by this margin
-const WORD_GAP_RATIO          = 1.8;  // gap > ratio × estCellW → word space
+const MIN_CELL_CONFIDENCE = 0.40;  // minimum dot-pattern match confidence
+const WORD_GAP_RATIO      = 1.8;   // gap > ratio × estCellW → word space
 
-// ─── Otsu binarizer ──────────────────────────────────────────────────────────
+// ─── OpenCV state ─────────────────────────────────────────────────────────────
+/** The live cv instance set by initializeDetector(); null until OpenCV loads. */
+let _cv           = null;
+let _opencvReady  = false;
+
 /**
- * Convert a grayscale ImageData to a pure binary ImageData using Otsu's
- * global threshold.  This is the normalisation step that makes NCC work
- * like face-recognition similarity matching:
+ * Compatibility shims — these were used by the old NCC template approach.
+ * No templates are loaded in the new OpenCV dot-detection approach, so both
+ * are always false / 0.  Preloader.f7 reads these to show status text.
+ */
+export let templatesAreSynthetic = false;
+export let templatesMissingCount = 0;
+
+// ─── OpenCV dot detection ─────────────────────────────────────────────────────
+/**
+ * Detect Braille dots using OpenCV.js:
+ *   1. Convert to grayscale
+ *   2. Apply CLAHE for local contrast enhancement
+ *   3. Gaussian blur to reduce noise
+ *   4. cv.threshold (Otsu, inverted) — dots are dark on a light background
+ *   5. Morphological opening to remove small noise blobs
+ *   6. cv.findContours — extract all external contours
+ *   7. Filter by area and circularity (≥ 0.35) to keep only round dot blobs
  *
- *   Both the reference template AND the extracted camera cell are converted
- *   to the SAME binary representation (0 = dot blob, 255 = background) before
- *   any comparison is made.  After binarization NCC measures purely whether
- *   the DOT POSITIONS agree — it is invariant to:
- *     • lighting (bright sun / dim room)
- *     • embossing strength (deep raised dots vs barely-raised)
- *     • ink density (heavy print vs faded)
- *     • camera exposure / colour temperature
- *
- * Inversion guard: if >60 % of pixels are dark the image is flipped so the
- * convention is always  dark dot blobs on white background  — matching the
- * template style produced by generate-templates.py.
- *
+ * @param {ImageData} imageData
+ * @returns {Array<{x, y, radius, confidence}>} detected dot centroids
+ */
+function _detectDotsOpenCV(imageData) {
+  const cv   = _cv;
+  const mats = [];
+  const track = (m) => { mats.push(m); return m; };
+
+  try {
+    const src = track(cv.matFromImageData(imageData));
+
+    // Step 1: Grayscale
+    const gray = track(new cv.Mat());
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+    // Step 2: CLAHE — local contrast enhancement
+    const enhanced = track(new cv.Mat());
+    const clahe    = new cv.CLAHE(2.0, new cv.Size(8, 8));
+    clahe.apply(gray, enhanced);
+    clahe.delete();
+
+    // Step 3: Gaussian blur to reduce noise
+    const blurred = track(new cv.Mat());
+    cv.GaussianBlur(enhanced, blurred, new cv.Size(5, 5), 1.5);
+
+    // Step 4: Otsu threshold — inverted (dark dots on light background)
+    const binary = track(new cv.Mat());
+    cv.threshold(blurred, binary, 0, 255, cv.THRESH_BINARY_INV | cv.THRESH_OTSU);
+
+    // Step 5: Morphological opening to remove small noise blobs
+    const kernel  = track(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3)));
+    const cleaned = track(new cv.Mat());
+    cv.morphologyEx(binary, cleaned, cv.MORPH_OPEN, kernel);
+
+    // Step 6: Find external contours
+    const contours  = track(new cv.MatVector());
+    const hierarchy = track(new cv.Mat());
+    cv.findContours(cleaned, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    const imgArea  = imageData.width * imageData.height;
+    const minArea  = Math.max(4,   imgArea * 0.00005);
+    const maxArea  = Math.max(800, imgArea * 0.04);
+
+    const dots = [];
+    for (let i = 0; i < contours.size(); i++) {
+      const contour = contours.get(i);
+      const area    = cv.contourArea(contour);
+
+      if (area < minArea || area > maxArea) { contour.delete(); continue; }
+
+      // Step 7: Circularity filter  (4π·A / P²) — keep ≥ 0.35 for round dots
+      const perimeter = cv.arcLength(contour, true);
+      if (perimeter === 0) { contour.delete(); continue; }
+      const circularity = (4 * Math.PI * area) / (perimeter * perimeter);
+      if (circularity < 0.35) { contour.delete(); continue; }
+
+      // Centroid via moments
+      const moments = cv.moments(contour);
+      if (moments.m00 === 0) { contour.delete(); continue; }
+      const cx = moments.m10 / moments.m00;
+      const cy = moments.m01 / moments.m00;
+      const radius = Math.sqrt(area / Math.PI);
+
+      dots.push({ x: cx, y: cy, radius, confidence: Math.min(1, circularity) });
+      contour.delete();
+    }
+
+    return dots;
+
+  } finally {
+    mats.forEach(m => { try { if (m && !m.isDeleted?.()) m.delete(); } catch {} });
+  }
+}
+
+// ─── Initialisation ───────────────────────────────────────────────────────────
+/**
+ * Async init — loads OpenCV.js WASM.
+ * When OpenCV loads successfully _cv is populated and _opencvReady is true;
+ * frames can be processed immediately.  If OpenCV fails to load within 10 s
+ * the detector gracefully falls back to the Canvas blob-detection code.
+ * @returns {Promise<void>}
+ */
+export async function initializeDetector() {
+  if (_opencvReady) return;
+
+  return new Promise((resolve) => {
+    import('@techstark/opencv-js').then((module) => {
+      const cvExport = module.default ?? module;
+
+      const onReady = (cvInstance) => {
+        _cv          = cvInstance;
+        _opencvReady = true;
+        console.info('[BrailleDetector] OpenCV.js ready — using cv.findContours dot detection');
+        resolve();
+      };
+
+      // Pattern A: cv object is already initialised (most Vite bundled builds)
+      if (cvExport && typeof cvExport.Mat === 'function') {
+        onReady(cvExport);
+        return;
+      }
+
+      // Pattern B: factory function — call it to get the cv instance
+      if (typeof cvExport === 'function') {
+        cvExport().then(onReady).catch(() => {
+          console.warn('[BrailleDetector] OpenCV factory call failed — Canvas fallback active');
+          resolve();
+        });
+        return;
+      }
+
+      // Pattern C: WASM runtime init callback
+      cvExport.onRuntimeInitialized = () => onReady(cvExport);
+
+      // 10 s timeout — resolve without OpenCV so the app still works
+      setTimeout(() => {
+        if (!_opencvReady) {
+          console.warn('[BrailleDetector] OpenCV init timed out — Canvas fallback active');
+          resolve();
+        }
+      }, 10000);
+
+    }).catch((err) => {
+      console.warn('[BrailleDetector] OpenCV.js import failed — Canvas fallback active:', err.message);
+      resolve();
+    });
+  });
+}
+
+// ─── Legacy template state sentinel ──────────────────────────────────────────
+// Kept so preloader.f7 / home.f7 imports don't break; values are always falsy.
+let detectorInitialized = true; // always true — no async template loads needed
+
+// ─── Otsu binarizer (kept for internal Canvas path) ──────────────────────────
+/**
+ * Convert a grayscale ImageData to a binary ImageData using Otsu's threshold.
+ * Used by the Canvas fallback dot-detection path.
+ * Inversion guard: if >60% of pixels are dark the result is flipped so the
+ * convention is always  dark dot blobs on white background.
  * @param {ImageData} gs  Grayscale source (R = G = B = luma, A = 255)
  * @returns {ImageData}   Binary ImageData (0 = dot, 255 = background)
  */
@@ -96,165 +251,9 @@ function _otsuBinarize(gs) {
   return new ImageData(out, gs.width, gs.height);
 }
 
-// ─── Template store ───────────────────────────────────────────────────────────
-/** @type {Object<string, ImageData>} */
-let templateImageData = {};
-let detectorInitialized = false;
 
-/**
- * True when real PNG photos are NOT present and synthetic dot-pattern images
- * are used instead.  UI may show a "No template photos" banner when true.
- */
-export let templatesAreSynthetic = false;
 
-/**
- * Number of template characters that fell back to synthetic dot-pattern images
- * because no real photo was found.  0 = all 26 letter photos loaded from real files.
- */
-export let templatesMissingCount = 0;
 
-// Vite glob import — resolved URLs for all 36 template photos (.jpg or .png).
-// Handles both uppercase (A.jpg) and lowercase (a.png) filenames.
-// Returns an empty object when no image files exist in the folder.
-const TEMPLATE_URLS = import.meta.glob(
-  [
-    '../../assets/braille-templates/*.jpg',
-    '../../assets/braille-templates/*.jpeg',
-    '../../assets/braille-templates/*.png',
-  ],
-  { eager: true, query: '?url', import: 'default' }
-);
-
-// ─── Synthetic template generator ────────────────────────────────────────────
-/**
- * Generate a grayscale ImageData for a single Braille character by drawing
- * its dot pattern on a canvas.  Used as a fallback when the real PNG photo
- * is absent from src/assets/braille-templates/.
- *
- * Standard Braille dot numbering applied here:
- *   dot 1 = left col, top row    dot 4 = right col, top row
- *   dot 2 = left col, mid row    dot 5 = right col, mid row
- *   dot 3 = left col, bot row    dot 6 = right col, bot row
- *
- * @param {string} ch  Single character key (e.g. 'a', '3')
- * @returns {ImageData}  Grayscale RGBA ImageData at TEMPLATE_W × TEMPLATE_H
- */
-function generateSyntheticTemplate(ch) {
-  const w = TEMPLATE_W;   // 64
-  const h = TEMPLATE_H;   // 96
-
-  const canvas = document.createElement('canvas');
-  canvas.width  = w;
-  canvas.height = h;
-  const ctx = canvas.getContext('2d');
-
-  // White background
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, w, h);
-
-  // Dot grid: 30 % / 70 % horizontal, 18 % / 50 % / 82 % vertical
-  const xL = Math.round(w * 0.30);  // left column  (~19 px)
-  const xR = Math.round(w * 0.70);  // right column (~45 px)
-  const yT = Math.round(h * 0.18);  // top row      (~17 px)
-  const yM = Math.round(h * 0.50);  // mid row      (~48 px)
-  const yB = Math.round(h * 0.82);  // bot row      (~79 px)
-  const r  = Math.round(w * 0.12);  // dot radius    ( ~8 px)
-
-  // positions[i] = [cx, cy] for dot (i+1)
-  const positions = [
-    [xL, yT], // dot 1  (bit 0)
-    [xL, yM], // dot 2  (bit 1)
-    [xL, yB], // dot 3  (bit 2)
-    [xR, yT], // dot 4  (bit 3)
-    [xR, yM], // dot 5  (bit 4)
-    [xR, yB], // dot 6  (bit 5)
-  ];
-
-  const pattern = CHAR_DOT_PATTERNS[ch] ?? 0;
-  ctx.fillStyle = 'rgb(30,30,30)';
-  for (let i = 0; i < 6; i++) {
-    if (pattern & (1 << i)) {
-      ctx.beginPath();
-      ctx.arc(positions[i][0], positions[i][1], r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  // Convert RGBA → grayscale ImageData
-  const rgba = ctx.getImageData(0, 0, w, h);
-  const gs   = new Uint8ClampedArray(rgba.data.length);
-  for (let i = 0; i < rgba.data.length; i += 4) {
-    const luma = Math.round(
-      0.299 * rgba.data[i] + 0.587 * rgba.data[i + 1] + 0.114 * rgba.data[i + 2]
-    );
-    gs[i] = gs[i + 1] = gs[i + 2] = luma;
-    gs[i + 3] = 255;
-  }
-  return new ImageData(gs, w, h);
-}
-
-// ─── Initialisation ───────────────────────────────────────────────────────────
-/**
- * Async init — loads all 36 template PNGs and builds the NCC reference table.
- * Must be called once (in preloader) before any frame is processed.
- * @returns {Promise<void>}
- */
-export async function initializeDetector() {
-  if (detectorInitialized) return;
-
-  const resolved = {};
-  let photoCount = 0;
-
-  await Promise.all(
-    TEMPLATE_CHARS.map(async (ch) => {
-      // Try all plausible filename variants: uppercase .jpg (e.g. A.jpg),
-      // lowercase .jpg (a.jpg), uppercase .png (A.png), lowercase .png (a.png)
-      const upper = ch.toUpperCase();
-      const lower = ch.toLowerCase();
-      const candidates = [
-        `../../assets/braille-templates/${upper}.jpg`,
-        `../../assets/braille-templates/${lower}.jpg`,
-        `../../assets/braille-templates/${upper}.jpeg`,
-        `../../assets/braille-templates/${lower}.jpeg`,
-        `../../assets/braille-templates/${upper}.png`,
-        `../../assets/braille-templates/${lower}.png`,
-      ];
-      try {
-        const key    = candidates.find(k => TEMPLATE_URLS[k]);
-        if (!key) throw new Error('no-glob-entry');
-        const url    = TEMPLATE_URLS[key];
-        const img    = await loadImage(typeof url === 'object' ? url.default : url);
-        // Binarize: normalise to the same binary domain (black dots / white bg)
-        // that each camera-extracted cell is converted to before NCC.
-        // This makes the comparison purely structural — invariant to the
-        // original photo brightness, paper colour, or embossing depth.
-        resolved[ch] = _otsuBinarize(renderToGrayscaleImageData(img, TEMPLATE_W, TEMPLATE_H));
-        photoCount++;
-      } catch {
-        // No real photo → render dot-pattern synthetic template then binarize.
-        resolved[ch] = _otsuBinarize(generateSyntheticTemplate(ch));
-      }
-    })
-  );
-
-  // Flag whether ALL templates fell back to synthetic (zero real photos found).
-  // When some photos are missing the synthetic fallback fills in for those chars,
-  // but NCC matching still uses the real photos that are present.
-  templatesMissingCount = TEMPLATE_CHARS.length - photoCount;
-  templatesAreSynthetic = photoCount === 0;
-
-  if (photoCount < TEMPLATE_CHARS.length) {
-    const missing = TEMPLATE_CHARS.length - photoCount;
-    console.info(
-      `[BrailleDetector] ${photoCount}/${TEMPLATE_CHARS.length} real letter template photos loaded; ` +
-      `${missing} synthetic dot-pattern template(s) generated as fallback. ` +
-      'Add missing PNG photos to src/assets/braille-templates/ for better accuracy.'
-    );
-  }
-
-  templateImageData = resolved;
-  detectorInitialized = true;
-}
 
 // ─── Image Quality Assessment ─────────────────────────────────────────────────
 /**
@@ -351,11 +350,36 @@ export function assessImageQuality(imageData) {
 
 // ─── Dot Detection ────────────────────────────────────────────────────────────
 /**
- * Detect Braille dots in a ROI ImageData using adaptive thresholding + blob analysis.
+ * Detect Braille dots in a ROI ImageData.
+ *
+ * PRIMARY path (when OpenCV.js is loaded):
+ *   1. Grayscale → CLAHE contrast → Gaussian blur
+ *   2. cv.threshold (Otsu, inverted) — dark dots on light background
+ *   3. Morphological opening — remove noise
+ *   4. cv.findContours → filter by area + circularity ≥ 0.35
+ *
+ * FALLBACK (Canvas API, no OpenCV):
+ *   Adaptive local threshold + connected-component blob analysis.
+ *
  * @param {ImageData} imageData
  * @returns {{ dots: Array<{x,y,radius,confidence}>, confidence: number, preprocessedImage: ImageData }}
  */
 export function detectBrailleDots(imageData) {
+  // ── PRIMARY: OpenCV dot detection ────────────────────────────────────────
+  if (_opencvReady && _cv) {
+    try {
+      const dots = _detectDotsOpenCV(imageData);
+      if (dots.length > 0) {
+        const confidence = dots.reduce((s, d) => s + d.confidence, 0) / dots.length;
+        return { dots, confidence, preprocessedImage: imageData };
+      }
+      // OpenCV returned 0 dots — fall through to Canvas path below
+    } catch (err) {
+      console.warn('[BrailleDetector] OpenCV detection failed, using Canvas fallback:', err.message);
+    }
+  }
+
+  // ── FALLBACK: Canvas adaptive-threshold + blob analysis ──────────────────
   const { embossed } = _quickEmbossCheck(imageData);
   const processed    = preprocessForBraille(imageData, embossed);
 
@@ -696,8 +720,12 @@ export function matchCellsByDotPattern(cellRegions) {
     _yClusterAndAssign(leftDots, 0);
     _yClusterAndAssign(rightDots, 3);
 
-    // ── Lookup character via DOT_PATTERN_TO_CHAR Map (letters-first order) ──
-    const bestChar = DOT_PATTERN_TO_CHAR.get(pattern) ?? '?';
+    // ── Lookup: DOT_PATTERN_TO_CHAR (numeric bitmask, letters-first order)
+    //           then BRAILLE_PATTERN_MAP (binary string, includes punctuation)
+    const binStr   = pattern.toString(2).padStart(6, '0');
+    const bestChar = DOT_PATTERN_TO_CHAR.get(pattern)
+                  ?? BRAILLE_PATTERN_MAP[binStr]
+                  ?? '?';
 
     console.log(
       `[DotPattern] r${cell.rowIndex}c${cell.colIndex}: ${dedupedDots.length} dots,`,
@@ -727,109 +755,30 @@ export function matchCellsByDotPattern(cellRegions) {
 }
 
 /**
-/**
- * Recognise each cell by binary NCC template photo matching.
+ * Match each cell to a character using the detected dot positions.
  *
- * This is a facial-recognition-style comparison pipeline:
- *   1. Extract the cell's pixel region from the ROI
- *   2. Resize to canonical 64×96 px
- *   3. Convert to grayscale
- *   4. Apply Otsu binarization → black dot blobs on white background
- *   5. Compute NCC against all 26 binarized reference templates
- *   6. Accept best match if confidence ≥ MIN_TEMPLATE_CONFIDENCE AND
- *      the margin over 2nd-best ≥ MIN_NCC_MARGIN (unambiguous identification)
+ * Replaces NCC template matching: each cell's dot coordinates (populated by
+ * segmentCellRegions) are classified into their 2×3 Braille grid positions,
+ * then the resulting 6-bit binary string is looked up in BRAILLE_PATTERN_MAP.
  *
- * Both the templates (binarized at load-time) and the query cell (binarized
- * here) are in the same pure binary domain, so NCC measures purely whether
- * dot POSITIONS agree — invariant to lighting, embossing strength, and focus.
+ * This function is a thin wrapper around matchCellsByDotPattern() that:
+ *  - Handles space markers (isSpace cells)
+ *  - Logs the recognised string for debugging
+ *
+ * @param {ImageData} roiData      Not used in this implementation (kept for API compatibility)
+ * @param {Array<{x,y,w,h,rowIndex,colIndex,isSpace,dots}>} cellRegions
+ * @returns {Array<{char, confidence, rowIndex, colIndex, isSpace}>}
  */
 export function matchCellsToTemplates(roiData, cellRegions) {
   if (!cellRegions || cellRegions.length === 0) return [];
 
-  const hasTemplates = Object.keys(templateImageData).length > 0;
-
-  const results = cellRegions.map((cell) => {
-    // Space markers are identified by gap analysis — no NCC needed
-    if (cell.isSpace) {
-      return { char: ' ', confidence: 1, rowIndex: cell.rowIndex, colIndex: cell.colIndex, isSpace: true };
-    }
-
-    if (!hasTemplates) {
-      return { char: '?', confidence: 0, rowIndex: cell.rowIndex, colIndex: cell.colIndex, isSpace: false };
-    }
-
-    // ── 1-4. Extract → resize → grayscale → binarize ─────────────────────
-    const cellImg = _extractCellImageData(roiData, cell);
-    if (!cellImg) {
-      return { char: '?', confidence: 0, rowIndex: cell.rowIndex, colIndex: cell.colIndex, isSpace: false };
-    }
-    const resized   = resizeImageData(cellImg, TEMPLATE_W, TEMPLATE_H);
-    const binarized = _otsuBinarize(resized);  // same domain as all templates
-
-    // ── 5. NCC vs every template ──────────────────────────────────────────
-    let bestChar  = '?';
-    let bestNCC   = -Infinity;
-    let secondNCC = -Infinity;
-
-    for (const [ch, tmplData] of Object.entries(templateImageData)) {
-      const ncc = computeNCC(binarized.data, tmplData.data);
-      if (ncc > bestNCC) {
-        secondNCC = bestNCC;
-        bestNCC   = ncc;
-        bestChar  = ch;
-      } else if (ncc > secondNCC) {
-        secondNCC = ncc;
-      }
-    }
-
-    // ── 6. Accept / reject — with dot-pattern fallback ───────────────────
-    // Map NCC [-1, 1] → confidence [0, 1]
-    const confidence = (bestNCC + 1) / 2;
-    const margin     = bestNCC - secondNCC;
-    const accepted   = confidence >= MIN_TEMPLATE_CONFIDENCE && margin >= MIN_NCC_MARGIN;
-
-    if (accepted) {
-      return {
-        char:      bestChar,
-        confidence,
-        rowIndex:  cell.rowIndex,
-        colIndex:  cell.colIndex,
-        isSpace:   false,
-        nccMargin: margin,
-      };
-    }
-
-    // NCC uncertain — fall back to lighting-invariant dot-position matching.
-    // matchCellsByDotPattern() uses the dot coordinates already stored on the
-    // cell region (populated by segmentCellRegions) so no re-detection needed.
-    const dpResult = matchCellsByDotPattern([cell])[0];
-    if (dpResult && dpResult.char !== '?' && dpResult.confidence >= 0.35) {
-      return {
-        char:      dpResult.char,
-        confidence: Math.min(dpResult.confidence, MIN_TEMPLATE_CONFIDENCE - 0.01),
-        rowIndex:  cell.rowIndex,
-        colIndex:  cell.colIndex,
-        isSpace:   false,
-        nccMargin: margin,
-        fromDotPattern: true,
-      };
-    }
-
-    return {
-      char:      '?',
-      confidence: confidence * 0.5,
-      rowIndex:  cell.rowIndex,
-      colIndex:  cell.colIndex,
-      isSpace:   false,
-      nccMargin: margin,
-    };
-  });
+  const results = matchCellsByDotPattern(cellRegions);
 
   const nonSpace = results.filter(c => !c.isSpace);
   const matched  = nonSpace.filter(c => c.char !== '?');
   console.log(
-    `[Detector] Binary-NCC matched: ${matched.length}/${nonSpace.length}`,
-    '→', nonSpace.map(c => c.char).join('')
+    `[Detector] Dot-pattern matched: ${matched.length}/${nonSpace.length}`,
+    '→', nonSpace.map(c => c.char).join(''),
   );
   return results;
 }
@@ -990,45 +939,6 @@ function _morphCloseBinary(binary, w, h, r) {
     }
   }
   return result;
-}
-
-function _extractCellImageData(roiData, cell) {
-  const dots = cell.dots || [];
-  let cx, cy;
-  if (dots.length > 0) {
-    cx = dots.reduce((s, d) => s + d.x, 0) / dots.length;
-    cy = dots.reduce((s, d) => s + d.y, 0) / dots.length;
-  } else {
-    cx = cell.x + cell.w / 2;
-    cy = cell.y + cell.h / 2;
-  }
-
-  const cw = Math.round(cell.w * 1.3);
-  const ch = Math.round(cell.h * 1.3);
-  const x0 = Math.max(0, Math.round(cx - cw / 2));
-  const y0 = Math.max(0, Math.round(cy - ch / 2));
-  const x1 = Math.min(roiData.width, x0 + cw);
-  const y1 = Math.min(roiData.height, y0 + ch);
-  const aw = x1 - x0;
-  const ah = y1 - y0;
-
-  if (aw < 4 || ah < 4) return null;
-
-  const pixelData = new Uint8ClampedArray(aw * ah * 4);
-  for (let dy = 0; dy < ah; dy++) {
-    for (let dx = 0; dx < aw; dx++) {
-      const srcIdx = ((y0 + dy) * roiData.width + (x0 + dx)) * 4;
-      const dstIdx = (dy * aw + dx) * 4;
-      const luma = Math.round(
-        0.299 * roiData.data[srcIdx]
-        + 0.587 * roiData.data[srcIdx + 1]
-        + 0.114 * roiData.data[srcIdx + 2]
-      );
-      pixelData[dstIdx] = pixelData[dstIdx + 1] = pixelData[dstIdx + 2] = luma;
-      pixelData[dstIdx + 3] = 255;
-    }
-  }
-  return new ImageData(pixelData, aw, ah);
 }
 
 function _estimateCellSize(dots) {

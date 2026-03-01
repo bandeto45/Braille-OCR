@@ -11,6 +11,12 @@
  *
  * bit 0 = dot 1 · bit 1 = dot 2 · bit 2 = dot 3
  * bit 3 = dot 4 · bit 4 = dot 5 · bit 5 = dot 6
+ *
+ * BRAILLE_PATTERN_MAP — 6-char binary string → character (used by dot-detection OCR)
+ * String format: "dot1 dot2 dot3 dot4 dot5 dot6"  (positions 0–5 = dots 1–6)
+ * Example: "100000" = dot1 only = 'a'
+ *          "110000" = dots 1,2   = 'b'
+ *          "100100" = dots 1,4   = 'c'
  */
 
 // ─── Grade 1 mapping: Braille Unicode char → plain text char ──────────────────
@@ -74,6 +80,56 @@ export const CHAR_DOT_PATTERNS = {
   p: 0b001111, q: 0b011111, r: 0b010111, s: 0b001110, t: 0b011110,
   u: 0b100101, v: 0b100111, w: 0b111010, x: 0b101101, y: 0b111101,
   z: 0b110101,
+};
+
+/**
+ * 6-bit binary string → lowercase character.
+ * String positions 0–5 correspond to dots 1–6:
+ *   pos 0 = dot 1 (left-top)   pos 3 = dot 4 (right-top)
+ *   pos 1 = dot 2 (left-mid)   pos 4 = dot 5 (right-mid)
+ *   pos 2 = dot 3 (left-bot)   pos 5 = dot 6 (right-bot)
+ *
+ * Used by the OpenCV dot-detection path to map a detected cell's
+ * 6-bit pattern string directly to a character, without NCC template matching.
+ *
+ * Examples (matching user-specified format "100000"→"A" etc, stored lowercase):
+ *   "100000" → 'a'   "110000" → 'b'   "100100" → 'c'
+ *   "100110" → 'd'   "100010" → 'e'   "110100" → 'f'
+ */
+export const BRAILLE_PATTERN_MAP = {
+  // ── Letters a–z ──────────────────────────────────────────────────────────
+  '100000': 'a',  // dot 1
+  '110000': 'b',  // dots 1,2
+  '100100': 'c',  // dots 1,4
+  '100110': 'd',  // dots 1,4,5
+  '100010': 'e',  // dots 1,5
+  '110100': 'f',  // dots 1,2,4
+  '110110': 'g',  // dots 1,2,4,5
+  '110010': 'h',  // dots 1,2,5
+  '010100': 'i',  // dots 2,4
+  '010110': 'j',  // dots 2,4,5
+  '101000': 'k',  // dots 1,3
+  '111000': 'l',  // dots 1,2,3
+  '101100': 'm',  // dots 1,3,4
+  '101110': 'n',  // dots 1,3,4,5
+  '101010': 'o',  // dots 1,3,5
+  '111100': 'p',  // dots 1,2,3,4
+  '111110': 'q',  // dots 1,2,3,4,5
+  '111010': 'r',  // dots 1,2,3,5
+  '011100': 's',  // dots 2,3,4
+  '011110': 't',  // dots 2,3,4,5
+  '101001': 'u',  // dots 1,3,6
+  '111001': 'v',  // dots 1,2,3,6
+  '010111': 'w',  // dots 2,4,5,6
+  '101101': 'x',  // dots 1,3,4,6
+  '101111': 'y',  // dots 1,3,4,5,6
+  '101011': 'z',  // dots 1,3,5,6
+  // ── Punctuation & special ─────────────────────────────────────────────────
+  '000000': ' ',  // space (no dots)
+  '010000': ',',  // dot 2
+  '010011': '.',  // dots 2,5,6   (Grade 1 period)
+  '010001': '!',  // dots 2,3,5   (Grade 1 exclamation)
+  '001011': '?',  // dots 2,3,5,6 (Grade 1 question)
 };
 
 /**
