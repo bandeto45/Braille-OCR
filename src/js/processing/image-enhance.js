@@ -120,6 +120,42 @@ export function unsharpMask(imageData, amount = 2.5, blurRadius = 5) {
 }
 
 /**
+ * Percentile contrast stretch only — no sharpening.
+ * Maps pixel luminance [p2, p98] → [0, 255] to expand narrow dynamic range
+ * of embossed-Braille photos without creating any halo artefacts.
+ *
+ * Used by the Canvas blob-detection fallback for embossed Braille — the
+ * adaptive local-threshold in that path fires on raw dot shadows without
+ * needing the extra edge-pop that unsharpMask provides for OpenCV.
+ *
+ * @param {ImageData} imageData
+ * @returns {ImageData}  Grayscale ImageData with expanded contrast
+ */
+export function percentileStretch(imageData) {
+  const src = imageData.data;
+  const n   = imageData.width * imageData.height;
+
+  const gray = new Float32Array(n);
+  for (let i = 0, p = 0; i < src.length; i += 4, p++) {
+    gray[p] = 0.299 * src[i] + 0.587 * src[i + 1] + 0.114 * src[i + 2];
+  }
+
+  const sorted = gray.slice().sort((a, b) => a - b);
+  const lo     = sorted[Math.floor(n * 0.02)];
+  const hi     = sorted[Math.floor(n * 0.98)];
+  const range  = Math.max(1, hi - lo);
+
+  const out = new Uint8ClampedArray(src.length);
+  for (let p = 0; p < n; p++) {
+    const v   = Math.round(Math.min(255, Math.max(0, (gray[p] - lo) / range * 255)));
+    const idx = p * 4;
+    out[idx] = out[idx + 1] = out[idx + 2] = v;
+    out[idx + 3] = 255;
+  }
+  return new ImageData(out, imageData.width, imageData.height);
+}
+
+/**
  * Full Braille pre-processing pipeline:
  *   1. Grayscale conversion
  *   2. For embossed: global percentile stretch [p2, p98] → [0, 255]

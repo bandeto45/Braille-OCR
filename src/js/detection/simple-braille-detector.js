@@ -12,12 +12,12 @@
  *     CLAHE(2.0, 8×8) → GaussianBlur(5,5) → Otsu INV → MorphOpen(3×3)
  *     circularity ≥ 0.35
  *
- *   EMBOSSED Braille (white-on-white, mean > 150, stdDev < 20):
- *     Dots are raised bumps with very subtle shadow contrast (stdDev can be < 20).
- *     preprocessForBraille(embossed=true): percentile-stretch [p2,p98]→[0,255]
- *       + unsharpMask(amount=2.5, radius=5) to amplify shadow micro-gradients.
- *     Then: GaussianBlur(3,3,0.8) → Otsu INV → MorphOpen(5×5)
- *     circularity ≥ 0.25 (shadow-based blobs are less round than ink dots)
+ *   EMBOSSED Braille (white-on-white, mean > 150):
+ *     Dots are raised bumps with very subtle shadow contrast.
+ *     percentileStretch [p2,p98]→[0,255] ONLY (no unsharpMask — halos from
+ *     unsharp inflate stdDev to ~67 causing adaptive threshold noise explosion).
+ *     Then: GaussianBlur(3,3,0.8) → adaptiveThreshold(MEAN_C, INV, ~2×dotDiam, C=10)
+ *     → MorphOpen(3×3) → circularity ≥ 0.20 (shadows can be oval)
  *
  * Falls back to Canvas API blob detection when OpenCV.js is not yet loaded.
  *
@@ -32,7 +32,7 @@
  */
 
 import { BRAILLE_PATTERN_MAP, CHAR_DOT_PATTERNS, DOT_PATTERN_TO_CHAR } from '../utils/braille-mappings.js';
-import { preprocessForBraille } from '../processing/image-enhance.js';
+import { preprocessForBraille, percentileStretch } from '../processing/image-enhance.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MIN_CELL_CONFIDENCE = 0.40;  // minimum dot-pattern match confidence
@@ -62,14 +62,18 @@ export let templatesMissingCount = 0;
  * @param {number}    minCircularity  Reject blobs below this circularity (4π·A/P²)
  * @returns {Array<{x, y, radius, confidence}>}
  */
-function _extractDots(cv, contours, imageData, minCircularity) {
+function _extractDots(cv, contours, imageData, minCircularity, isEmbossed = false) {
   const imgArea = imageData.width * imageData.height;
-  // Scale-aware area bounds:
-  // At 1280px a Braille dot is radius ≈9-12px → area ≈260-450px ≈ imgArea × 0.00027.
-  // minArea * 0.0002 retains real dots while rejecting single-pixel noise;
-  // maxArea * 0.012 caps at ~12× a typical dot area to exclude large paper blobs.
-  const minArea = Math.max(20,  imgArea * 0.0002);
-  const maxArea = Math.max(300, imgArea * 0.012);
+  // Scale-aware area bounds.
+  // Embossed path uses tight bounds (same as the Canvas fallback) to reject
+  // large paper-texture blobs that pass the loose defaults at high resolution.
+  // At 1280px a Braille dot has radius ≈9-12px → area ≈260-450px.
+  const minArea = isEmbossed
+    ? Math.max(200, imgArea * 0.0003)   // ≥ r≈8px at 1280px
+    : Math.max(20,  imgArea * 0.0002);
+  const maxArea = isEmbossed
+    ? Math.max(2000, imgArea * 0.006)   // ≤ r≈34px at 1280px
+    : Math.max(300,  imgArea * 0.012);
 
   const dots = [];
   for (let i = 0; i < contours.size(); i++) {
@@ -103,15 +107,13 @@ function _extractDots(cv, contours, imageData, minCircularity) {
  *   2. MorphOpen(3×3) → findContours → circularity ≥ 0.35
  *
  * EMBOSSED path (white-on-white raised-dot Braille):
- *   Dots cast only subtle shadows (stdDev can be < 20).  Raw image contrast
- *   is too low for CLAHE alone to reliably separate dots from paper.
- *   Solution: run preprocessForBraille(imageData, true) FIRST:
- *     • Percentile stretch [p2, p98] → [0, 255]  (expands dynamic range)
- *     • unsharpMask(amount=1.2, radius=5)         (mild edge pop, avoids halos)
- *   Then feed into an adaptive-threshold pipeline (Otsu fails here because
- *   unsharp halos dominate the histogram, causing 22%+ false dark pixels):
- *   1. Grayscale → GaussianBlur(3,3,0.8) → adaptiveThreshold(MEAN_C, INV, ~2×dotDiam, C=5)
- *   2. MorphOpen(3×3) → findContours → circularity ≥ 0.35
+ *   Dots cast only subtle shadows.  Using unsharpMask before adaptive
+ *   threshold creates halos that inflate stdDev (~12→67), causing 40%+
+ *   false-positive dark pixels.  Solution: percentileStretch ONLY so the
+ *   local adaptive threshold fires on true dot shadows:
+ *   1. percentileStretch → GaussianBlur(3,3,0.8)
+ *      → adaptiveThreshold(MEAN_C, INV, ~2×dotDiam, C=10)
+ *   2. MorphOpen(3×3) → findContours → circularity ≥ 0.20 (oval shadows OK)
  *
  * @param {ImageData} imageData
  * @param {boolean}   isEmbossed  Use embossed preprocessing when true
@@ -125,29 +127,31 @@ function _detectDotsOpenCV(imageData, isEmbossed = false) {
   try {
     if (isEmbossed) {
       // ── EMBOSSED PATH ──────────────────────────────────────────────────────
-      // Pre-process: percentile stretch + unsharp mask amplifies dot shadows.
-      // The resulting ImageData has dark dot silhouettes on a bright background.
-      const preprocessed = preprocessForBraille(imageData, true);
+      // Pre-process: percentile stretch [p2,p98]→[0,255] ONLY — NO unsharp mask.
+      // unsharpMask(1.2) raises image stdDev from ~12 to ~67, creating halos that
+      // cause adaptive threshold to mark 40%+ of pixels dark and merge/miss dots.
+      // percentileStretch alone expands the narrow dynamic range so the subtle
+      // raised-dot shadows are visible to the local adaptive threshold.
+      const preprocessed = percentileStretch(imageData);
       const src  = track(cv.matFromImageData(preprocessed));
       const gray = track(new cv.Mat());
       cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-      // Light blur removes sharpening noise without losing dot edges
+      // Light blur removes high-frequency noise before thresholding
       const blurred = track(new cv.Mat());
       cv.GaussianBlur(gray, blurred, new cv.Size(3, 3), 0.8);
 
-      // Adaptive threshold instead of global Otsu:
-      // Global Otsu fires on the dominant halo histogram peak (not on dot vs. paper),
-      // producing 22%+ dark pixels.  Adaptive mean-C thresholds locally around each
-      // pixel, so only genuine dark spots relative to their neighbourhood are marked.
-      // blockSize ≈ 2× dot diameter (at 1280px dots are ≈20px wide → blockSize=41);
-      // must be odd and ≥11.  C=5 subtracts a small constant to prevent paper texture.
+      // Adaptive mean-C threshold: measures local contrast around each pixel so
+      // only genuine dot-shaped dark spots relative to their neighbourhood are
+      // marked positive.  Without unsharp halos, C=10 is the right bias:
+      // pixels must be 10 below their local mean to qualify as a dot candidate.
+      // blockSize ≈ 2× dot diameter; must be odd and ≥11.
       const binary = track(new cv.Mat());
       const estDotDiam = Math.max(11, Math.round(Math.sqrt(imageData.width * imageData.height) * 0.022));
       const blockSize  = estDotDiam % 2 === 0 ? estDotDiam + 1 : estDotDiam;
-      cv.adaptiveThreshold(blurred, binary, 255, cv.ADAPTIVE_THRESH_MEAN_C, cv.THRESH_BINARY_INV, blockSize, 5);
+      cv.adaptiveThreshold(blurred, binary, 255, cv.ADAPTIVE_THRESH_MEAN_C, cv.THRESH_BINARY_INV, blockSize, 10);
 
-      // 3×3 kernel: gentler open to avoid eroding small dot blobs when unsharp is mild
+      // 3×3 kernel open — removes thin noise specks, preserves dot blobs
       const kernel  = track(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3)));
       const cleaned = track(new cv.Mat());
       cv.morphologyEx(binary, cleaned, cv.MORPH_OPEN, kernel);
@@ -156,8 +160,10 @@ function _detectDotsOpenCV(imageData, isEmbossed = false) {
       const hierarchy = track(new cv.Mat());
       cv.findContours(cleaned, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-      // Raise circularity to 0.35: adaptive threshold produces crisper blobs
-      return _extractDots(cv, contours, imageData, 0.35);
+      // Embossed dot shadows can be slightly oval (raking-light effect) so
+      // lower circularity threshold to 0.20; use tight area bounds matching
+      // the Canvas-path embossed bounds to reject large noise regions.
+      return _extractDots(cv, contours, imageData, 0.20, true);
 
     } else {
       // ── NON-EMBOSSED PATH (original pipeline) ──────────────────────────────
@@ -448,22 +454,36 @@ export function detectBrailleDots(imageData) {
   }
 
   // ── FALLBACK: Canvas adaptive-threshold + blob analysis ──────────────────
-  const processed    = preprocessForBraille(imageData, embossed);
+  // For embossed Braille the adaptive local threshold fires directly on raw
+  // dot shadows — no unsharp mask is needed (and is actively harmful here:
+  // unsharpMask(1.2) raises image stdDev from ~12 to ~67, causing ~45% of
+  // pixels to be flagged dark even at C=2, producing 1000+ noise blobs).
+  // Only a percentile stretch is applied so that dot shadows are scaled to
+  // a useful dynamic range before thresholding.
+  const processed = embossed
+    ? percentileStretch(imageData)
+    : preprocessForBraille(imageData, false);
 
   const w = processed.width, h = processed.height;
   const data = processed.data;
 
   // ── Compute local adaptive threshold ──
-  const blockSize = Math.max(11, Math.round(Math.min(w, h) / 20) | 1);
+  // blockSize: for embossed use the same formula as the OpenCV path
+  // (≈ 2× estimated dot diameter) so local contrast is measured at the
+  // right spatial scale, not at the coarser min(w,h)/20 scale.
+  // For non-embossed keep the existing min(w,h)/20 formula.
+  const estDotDiamCanvas = Math.max(11, Math.round(Math.sqrt(w * h) * 0.022));
+  const blockSize = embossed
+    ? (estDotDiamCanvas % 2 === 0 ? estDotDiamCanvas + 1 : estDotDiamCanvas)
+    : Math.max(11, Math.round(Math.min(w, h) / 20) | 1);
   const integral  = _buildIntegralImage(data, w, h);
 
   let binary = new Uint8Array(w * h);
   // C is the threshold bias: pixel < (localMean - C) → dot candidate.
-  // After the embossed preprocessing path (percentile-stretch + unsharp mask),
-  // local contrast is already amplified so a tighter C=2 avoids marking paper
-  // texture while still firing on real dot-shadow gradients.
-  // For non-embossed (printed) Braille the existing C=5 remains appropriate.
-  const C = embossed ? 2 : 5;
+  // Embossed path (percentile-stretch only, no unsharp): C=10 produces ~18%
+  // dark pixels and ~30 valid dot blobs for a one-line HELLO WORLD at 1280px.
+  // Non-embossed (printed) path: C=5 keeps existing behaviour.
+  const C = embossed ? 10 : 5;
 
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
@@ -488,11 +508,24 @@ export function detectBrailleDots(imageData) {
 
   // Scale blob size / radius limits relative to image dimensions so the
   // detector works correctly for both 720p video frames AND full-res photos.
+  // Embossed path: tighter bounds reject tiny noise blobs (paper texture)
+  // and large paper regions that pass the loose defaults and contaminate
+  // the radius filter.  At 1280px ROI a Braille dot has radius ≈ 10-15px
+  // (area ≈ 300-700px²).  The non-embossed (printed) path retains the
+  // original wider bounds for ink dots which vary more in size.
   const imgArea   = w * h;
-  const minBlobSz = Math.max(4,   imgArea * 0.00005);  // ≥ 0.005% of image
-  const maxBlobSz = Math.max(800, imgArea * 0.04);     // ≤ 4% of image
-  const minRadius = Math.max(1.5, Math.sqrt(imgArea) * 0.004);
-  const maxRadius = Math.max(20,  Math.sqrt(imgArea) * 0.18);
+  const minBlobSz = embossed
+    ? Math.max(200, imgArea * 0.0003)    // ≥ r≈8px at 1280px
+    : Math.max(4,   imgArea * 0.00005);  // ≥ 0.005% of image
+  const maxBlobSz = embossed
+    ? Math.max(2000, imgArea * 0.006)    // ≤ r≈34px at 1280px
+    : Math.max(800,  imgArea * 0.04);    // ≤ 4% of image
+  const minRadius = embossed
+    ? Math.max(6, Math.sqrt(imgArea) * 0.008)
+    : Math.max(1.5, Math.sqrt(imgArea) * 0.004);
+  const maxRadius = embossed
+    ? Math.max(30, Math.sqrt(imgArea) * 0.05)
+    : Math.max(20, Math.sqrt(imgArea) * 0.18);
 
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
@@ -637,7 +670,9 @@ export function segmentCellRegions(imageData, dots, estCellW, estCellH) {
     for (const dot of sortedDots) {
       let placed = false;
       for (const cell of cellClusters) {
-        if (Math.abs(dot.x - cell.meanX) < estCellW * 0.7) {
+        // 0.48 × cellW keeps within-cell cols together (gap ≈ 0.38 × cellW)
+        // while separating adjacent cells (gap ≈ 0.62 × cellW).
+        if (Math.abs(dot.x - cell.meanX) < estCellW * 0.48) {
           cell.dots.push(dot);
           cell.meanX = cell.dots.reduce((s, d) => s + d.x, 0) / cell.dots.length;
           placed = true; break;
@@ -645,6 +680,9 @@ export function segmentCellRegions(imageData, dots, estCellW, estCellH) {
       }
       if (!placed) cellClusters.push({ meanX: dot.x, dots: [dot] });
     }
+
+    // ── Re-merge cells that share dots across the within-cell column gap ──
+    // (already handled by the if-placed logic above)
 
     // Build bounding boxes and detect word spaces
     let prevCellX = null;
@@ -745,6 +783,30 @@ export function matchCellsByDotPattern(cellRegions) {
       return { char: '?', confidence: 0, rowIndex: cell.rowIndex, colIndex: cell.colIndex, isSpace: false, dotPattern: 0 };
     }
 
+    // ── Step 1: Unified Y-clustering across ALL dots in this cell ─────────────
+    // The old approach clustered Y independently per column group, which caused
+    // a single dot in the right column to always land in rowIdx=0 (dot 4)
+    // regardless of its actual vertical position — e.g. a lone mid-row dot (dot 5)
+    // was mistakenly assigned as dot 4.  Clustering by Y first, across both
+    // columns, gives each dot its correct row position (0=top, 1=mid, 2=bot)
+    // before column membership is determined.
+    const Y_THRESH = (cell.h > 0 ? cell.h * 0.30 : 25);
+    const allYSorted = [...dedupedDots].sort((a, b) => a.y - b.y);
+    const yGroups = [];
+    for (const d of allYSorted) {
+      let placed = false;
+      for (const g of yGroups) {
+        if (Math.abs(d.y - g.meanY) < Y_THRESH) {
+          g.pts.push(d);
+          g.meanY = g.pts.reduce((s, p) => s + p.y, 0) / g.pts.length;
+          placed = true; break;
+        }
+      }
+      if (!placed) yGroups.push({ meanY: d.y, pts: [d] });
+    }
+    yGroups.sort((a, b) => a.meanY - b.meanY);
+
+    // ── Step 2: Find column split point (largest X-gap among all dots) ────────
     const sortedByX = [...dedupedDots].sort((a, b) => a.x - b.x);
     let bestGap = 0, gapIdx = -1;
     for (let i = 1; i < sortedByX.length; i++) {
@@ -752,40 +814,28 @@ export function matchCellsByDotPattern(cellRegions) {
       if (gap > bestGap) { bestGap = gap; gapIdx = i; }
     }
     const minColGap = medRadius * 2.4;
-    let leftDots, rightDots;
+    let colMidX;
     if (bestGap > minColGap && gapIdx > 0) {
-      leftDots  = sortedByX.slice(0, gapIdx);
-      rightDots = sortedByX.slice(gapIdx);
+      // Column split detected: midpoint between the two flanking dots
+      colMidX = (sortedByX[gapIdx - 1].x + sortedByX[gapIdx].x) / 2;
     } else {
-      leftDots  = sortedByX;
-      rightDots = [];
+      // No real column gap — all dots are in the same (left) column.
+      // Setting colMidX = max(x) + 1 places every dot strictly to the left,
+      // correctly assigning all bits to the left-column offsets (0/1/2).
+      // The old formula (min+max)/2+1 failed when X range was < 4px because
+      // the rightmost dot could land exactly on or above colMidX (e.g. for 'l'
+      // with xs=[926,927,929]: (926+929)/2+1=928.5, and 929≥928.5 → right col).
+      colMidX = Math.max(...dedupedDots.map(d => d.x)) + 1;
     }
 
-    const Y_THRESH = (cell.h > 0 ? cell.h * 0.30 : 25);
-    function _yClusterAndAssign(colDots, colOffset) {
-      if (colDots.length === 0) return;
-      const ySorted = [...colDots].sort((a, b) => a.y - b.y);
-      const yGroups = [];
-      for (const d of ySorted) {
-        let placed = false;
-        for (const g of yGroups) {
-          if (Math.abs(d.y - g.meanY) < Y_THRESH) {
-            g.pts.push(d);
-            g.meanY = g.pts.reduce((s, p) => s + p.y, 0) / g.pts.length;
-            placed = true; break;
-          }
-        }
-        if (!placed) yGroups.push({ meanY: d.y, pts: [d] });
-      }
-      yGroups.sort((a, b) => a.meanY - b.meanY);
-      yGroups.slice(0, 3).forEach((g, rowIdx) => {
-        pattern |= (1 << (colOffset + rowIdx));
-      });
-    }
-
+    // ── Step 3: Build 6-bit pattern — rowIdx from yGroups, col from X vs midX ─
     let pattern = 0;
-    _yClusterAndAssign(leftDots, 0);
-    _yClusterAndAssign(rightDots, 3);
+    yGroups.slice(0, 3).forEach((g, rowIdx) => {
+      for (const d of g.pts) {
+        const colOffset = d.x < colMidX ? 0 : 3;  // left col = bits 0-2, right = 3-5
+        pattern |= (1 << (colOffset + rowIdx));
+      }
+    });
 
     // ── Lookup: DOT_PATTERN_TO_CHAR (numeric bitmask, letters-first order)
     //           then BRAILLE_PATTERN_MAP (binary string LSB-first: pos0=dot1…pos5=dot6)
@@ -796,10 +846,13 @@ export function matchCellsByDotPattern(cellRegions) {
                   ?? BRAILLE_PATTERN_MAP[binStr]
                   ?? '?';
 
+    const leftDots  = sortedByX.slice(0, gapIdx > 0 && bestGap > minColGap ? gapIdx : sortedByX.length);
+    const rightDots = sortedByX.slice(gapIdx > 0 && bestGap > minColGap ? gapIdx : sortedByX.length);
+
     console.log(
       `[DotPattern] r${cell.rowIndex}c${cell.colIndex}: ${dedupedDots.length} dots,`,
       `L=${leftDots.length} R=${rightDots.length}, gap=${bestGap.toFixed(1)},`,
-      `pattern=${binStr} → '${bestChar}'`
+      `yGroups=${yGroups.length}, colMid=${colMidX.toFixed(0)}, pattern=${binStr} → '${bestChar}'`
     );
 
     const dotCount = dedupedDots.length;

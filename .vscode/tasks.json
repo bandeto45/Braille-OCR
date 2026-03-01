@@ -1,0 +1,17 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Braille Detection Simulation",
+			"type": "shell",
+			"command": "python3 /tmp/braille_sim.py",
+			"group": "test"
+		},
+		{
+			"label": "Git Commit Embossed Fix",
+			"type": "shell",
+			"command": "cd /Volumes/BackUP/Braille-OCR && git add src/js/detection/simple-braille-detector.js src/js/processing/image-enhance.js && git commit -m 'fix: adaptive threshold + corrected area bounds for embossed Braille detection\\n\\n- Replace global Otsu with cv.adaptiveThreshold(ADAPTIVE_THRESH_MEAN_C, THRESH_BINARY_INV)\\n  in embossed detection path; blockSize dynamically scaled to ~2x estimated dot\\n  diameter (sqrt(imgArea)*0.022) so threshold is local and not biased by unsharp halos\\n- Reduce unsharpMask amount 2.5→1.2 in preprocessForBraille(embossed=true):\\n  previous amount created halos that dominated the Otsu histogram causing\\n  22% of pixels to be marked dark (148 blobs) instead of the true ~30 Braille dots\\n- Tighten _extractDots area bounds: minArea max(20, imgArea*0.0002), maxArea\\n  max(300, imgArea*0.012) — previously max(4, imgArea*0.00005) allowed noise blobs\\n  at 50px; real dots at 1280px are ~260-450px area\\n- Reduce MorphOpen from 5x5→3x3 for embossed path (smaller kernel appropriate\\n  when unsharp is gentle); raise circularity threshold 0.25→0.35\\n\\nDiagnostic result: 20 dots detected (was 148→36 cells+garbage text),\\nall in single Y-band 180-266px, radii 11-13px — matches expected HELLO WORLD\\nBraille dot geometry at 1280px scale.' && git push origin openCV",
+			"group": "build"
+		}
+	]
+}

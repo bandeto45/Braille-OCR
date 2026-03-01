@@ -1,12 +1,12 @@
 # Braille Project - AI Coding Agent Instructions
 
 ## Project Overview
-A mobile web application built with Framework7 v9.0.3 that scans Braille from camera images and converts it to readable text. The recognition engine uses **template-photo OCR**: 26 pre-captured reference photos of individual Braille characters (a–z) are stored as assets; each detected cell in a live frame or uploaded image is compared against all 26 templates using Canvas-based pixel similarity to identify the character. All matched characters are assembled left-to-right, top-to-bottom into complete words and sentences. Deployed as both a progressive web app and a Cordova-wrapped Android/iOS app. Enables sighted users to read Braille documents and helps visually impaired users digitize Braille content.
+A mobile web application built with Framework7 v9.0.3 that scans Braille from camera images and converts it to readable text. The recognition engine uses **OpenCV.js dot-pattern OCR**: OpenCV.js (loaded from CDN as a WASM module) detects Braille dot blobs via adaptive thresholding and contour analysis; the detected dots per cell are clustered into the standard 2×3 grid and the resulting 6-bit pattern is looked up in `BRAILLE_PATTERN_MAP` to identify the character. A Canvas API blob-detection path serves as an automatic fallback when OpenCV.js has not yet loaded. All matched characters are assembled left-to-right, top-to-bottom into complete words and sentences. Deployed as both a progressive web app and a Cordova-wrapped Android/iOS app. Enables sighted users to read Braille documents and helps visually impaired users digitize Braille content.
 
 ## Tech Stack
 - **Framework**: Framework7 v9.0.3 (mobile-first web framework)
 - **Languages**: HTML, CSS/LESS, JavaScript (ES Modules)
-- **Computer Vision**: Canvas API-based (`simple-braille-detector.js`) — primary, no external libs; uses **26 reference template photos** stored in `src/assets/braille-templates/` for character-level OCR matching; `@techstark/opencv-js` ^4.12.0 — optional alternative detector
+- **Computer Vision**: OpenCV.js (`simple-braille-detector.js`) — **primary**; uses `@techstark/opencv-js` ^4.12.0 loaded as a WASM module via CDN `<script>` tag; dot-pattern 6-bit lookup in `BRAILLE_PATTERN_MAP` — no NCC, no template photos at runtime; Canvas API blob-detection — **automatic fallback** when OpenCV.js WASM is not yet loaded
 - **Camera Access**: MediaDevices API (`getUserMedia`) for web/iOS; `cordova-plugin-android-permissions` for Android permission gating
 - **Build System**: Vite ^7.3.1, `rollup-plugin-framework7` for `.f7` files, `less` for styles
 - **Mobile Wrapper**: Apache Cordova (Android + iOS targets)
@@ -82,9 +82,9 @@ state: {
   detectionHistory: [],   // Last 50 detections { text, confidence, braille, timestamp }
   isDetecting: false,
   confidence: 0,
-  templatesLoaded: false, // true once initializeDetector() resolves in preloader
-  opencvInitialized: false,
-  opencvLoading: false,
+  templatesLoaded: false, // true once initializeDetector() resolves (OpenCV WASM or timeout)
+  opencvInitialized: false,  // unused — kept for backward compat
+  opencvLoading: false,      // unused — kept for backward compat
   // Camera
   cameraActive: false,
   flashlightOn: false,
@@ -101,60 +101,60 @@ state: {
 
 ---
 
-## Detection Pipeline (Template-Photo OCR Implementation)
+## Detection Pipeline (OpenCV.js Dot-Pattern OCR)
 
-All pages use `simple-braille-detector.js` (Canvas API only, no external CV library). Recognition is driven by **26 pre-captured Braille character reference photos** stored in `src/assets/braille-templates/`. Each detected cell region is binarized (Otsu threshold) then matched against all 26 binarized templates via Normalised Cross-Correlation. The best match must beat the second-best by `MIN_NCC_MARGIN = 0.02` to be accepted. The complete pipeline extracts **all Braille codes** present—spanning one or more rows—and assembles them into a full sentence. Missing template photos automatically fall back to synthetic dot-pattern images.
+All pages use `simple-braille-detector.js`. The **primary** path uses OpenCV.js (cv.findContours + adaptive threshold) to locate dot blobs; the **fallback** uses Canvas API blob detection when OpenCV has not loaded. Both paths then hand off to the shared dot-pattern recogniser which maps detected dot positions onto the standard 2×3 Braille grid and looks up the resulting 6-bit integer in `DOT_PATTERN_TO_CHAR` / `BRAILLE_PATTERN_MAP`.
 
-### 26 Template Reference Photos
+> **No template photos are loaded at runtime.** The `src/assets/braille-templates/` folder exists but is not used by the current detection engine.
 
-| Set | File names | Characters |
-|-----|-----------|------------|
-| Letters | `a.png` … `z.png` | `a` – `z` (26 files) |
-
-**Total: 26 PNG files** located in `src/assets/braille-templates/`.
-
-Each template photo:
-- Must be a **clean, well-lit, front-facing** image of a single embossed or printed Braille cell.
-- Stored at **64 × 96 px** (2 columns × 3 rows dot grid, 16 px horizontal / 16 px vertical cell margin).
-- Loaded once at detector initialisation via ES6 imports and drawn into off-screen `<canvas>` elements to produce normalised `ImageData` for comparison.
-
-### Template Loading & Initialisation (`initializeDetector`)
-
-Templates are loaded via **Vite `import.meta.glob()`** — not individual static imports. The glob resolves URLs for all `.jpg`, `.jpeg`, and `.png` files in `src/assets/braille-templates/`. For each character in `TEMPLATE_CHARS` the loader tries multiple filename variants in priority order:
-
-```
-A.jpg → a.jpg → A.jpeg → a.jpeg → A.png → a.png
-```
-
-After loading, **Otsu binarization** is applied to every template. Each camera-extracted cell is binarized the same way before NCC comparison. The binary representation (black dots on white background) makes NCC invariant to lighting, embossing depth, and camera exposure. An **inversion guard** flips pixels when >60% are dark (white-dot-on-dark-paper convention).
-
-If a real photo is **missing** for a character, a **synthetic dot-pattern template** is auto-generated on a canvas using the `CHAR_DOT_PATTERNS` masks — so detection works even without all 26 real photos.
+### `initializeDetector()` — OpenCV.js WASM Loading
 
 ```javascript
-// Vite glob import — resolves URLs for all template image files
-const TEMPLATE_URLS = import.meta.glob(
-  [
-    '../../assets/braille-templates/*.jpg',
-    '../../assets/braille-templates/*.jpeg',
-    '../../assets/braille-templates/*.png',
-  ],
-  { eager: true, query: '?url', import: 'default' }
-);
+// Exported compatibility shims — always false/0 (kept so preloader.f7 doesn't break)
+export let templatesAreSynthetic = false;
+export let templatesMissingCount = 0;
 
-// Exported status flags (read by preloader.f7)
-export let templatesAreSynthetic = false;   // true when ALL 26 are synthetic
-export let templatesMissingCount = 0;       // count of chars using synthetic fallback
+/**
+ * Async init — waits for OpenCV.js WASM loaded via <script> tag in index.html.
+ * Three phases:
+ *   A. cv.Mat already exists     → resolve immediately
+ *   B. cv exists, WASM loading   → attach cv.onRuntimeInitialized
+ *   C. cv not yet in scope       → poll setInterval(200ms)
+ * 15 s timeout → resolve without OpenCV so the Canvas fallback stays active.
+ */
+export async function initializeDetector() { ... }
+```
 
-export async function initializeDetector() {
-  // For each TEMPLATE_CHAR: find URL via glob, loadImage(), renderToGrayscaleImageData(),
-  // then _otsuBinarize() → stored in templateImageData[char].
-  // On miss: generateSyntheticTemplate(ch) → _otsuBinarize() as fallback.
-}
+After `initializeDetector()` resolves `_opencvReady = true` and `_cv` is set. If it times out, both remain falsy and the Canvas fallback handles all frames.
 
-// _otsuBinarize(gs: ImageData) -> ImageData  (0 = dot, 255 = background)
-// generateSyntheticTemplate(ch: string) -> ImageData  (dot pattern drawn on canvas)
-// loadImage(src) -> Promise<HTMLImageElement>
-// renderToGrayscaleImageData(img, w, h) -> ImageData (R=G=B=luma)
+### Two Detection Modes (selected from image statistics)
+
+**PRINTED Braille** (`mean < 150` or `stdDev ≥ 20`):
+```
+CLAHE(2.0, 8×8) → GaussianBlur(5,5,1.5) → Otsu INV threshold
+→ MorphOpen(3×3) → findContours → circularity ≥ 0.35
+```
+
+**EMBOSSED Braille** (white-on-white, `mean > 150`):
+```
+percentileStretch [p2,p98]→[0,255]  (NO unsharpMask — halos cause noise explosion)
+→ GaussianBlur(3,3,0.8)
+→ adaptiveThreshold(MEAN_C, INV, blockSize≈2×dotDiam, C=10)
+→ MorphOpen(3×3) → findContours → circularity ≥ 0.20
+```
+
+### `_extractDots(cv, contours, imageData, minCircularity, isEmbossed=false)`
+
+Shared contour→dot extractor for both OpenCV paths. Filters by area and circularity.
+
+```javascript
+// Scale-aware area bounds
+const minArea = isEmbossed
+  ? Math.max(200,  imgArea * 0.0003)  // ≥ r≈8px at 1280px
+  : Math.max(20,   imgArea * 0.0002);
+const maxArea = isEmbossed
+  ? Math.max(2000, imgArea * 0.006)   // ≤ r≈34px at 1280px
+  : Math.max(300,  imgArea * 0.012);
 ```
 
 ### Step-by-step pipeline in `camera.f7` and `home.f7`:
@@ -169,53 +169,53 @@ export async function initializeDetector() {
 3. assessImageQuality(roiData)
    -> { isAcceptable, score, summary, advice, embossed }
    Scores: blur (Laplacian variance), exposure, contrast, tilt (gradient orientation)
-   Embossed Braille detection (white-on-white, high brightness, low contrast)
-   If not acceptable -> show quality hint toast (5s cooldown)
+   Embossed: mean > 150 && stdDev < 38 → score forced to 0.7
+   If !isAcceptable && !embossed → show status hint, skip frame
 
 4. detectBrailleDots(roiData)
    -> { dots: [{x, y, radius, confidence}], confidence, preprocessedImage }
-   Canvas-only blob detection with adaptive preprocessing
+   PRIMARY: _detectDotsOpenCV(imageData, embossed) — cv.findContours
+   FALLBACK: Canvas adaptive-threshold + flood-fill blob analysis
+   embossed flag determined by _quickEmbossCheck(imageData) (mean > 150)
 
-5. Estimate cell size from dot spacing (median inter-dot distances)
-   estCellW = median(xDeltas) × 2.2  (clamped to ROI-relative bounds)
-   estCellH = median(yDeltas) × 2.6
+5. segmentCellRegions(roiData, dots)
+   -> { cellRegions: [{ x, y, w, h, rowIndex, colIndex, isSpace, dots }], confidence }
+   Cell size estimated internally from dot spacing (median deltas × 2.2/2.6).
+   Groups dots into Braille-line rows (Y proximity < estCellH × 1.1).
+   Within each row, clusters dots into cells (X proximity < estCellW × 0.48).
+   Word-space gap: horizontal gap > 1.8 × estCellW → insert isSpace marker.
+   Noise guard: rejects result if realCells.length === 0 or > 60.
+   Each cellRegion carries a `dots` array of the raw dot positions.
 
-6. segmentCellRegions(roiData, dots, estCellW, estCellH)
-   -> cellRegions: [{ x, y, w, h, rowIndex, colIndex }]
-   Groups dots into rows (by Y proximity ≤ 0.5 × estCellH).
-   Within each row, sorts cells left-to-right by X.
-   Word-space gap: if horizontal gap between consecutive cells > 1.8 × estCellW -> insert space marker.
-   Rejects if cellRegions.length === 0 or > 60 (noise guard for multi-line content).
+6. matchCellsToTemplates(roiData, cellRegions)
+   -> matchedCells: [{ char, confidence, rowIndex, colIndex, isSpace, dotPattern }]
+   Wrapper around matchCellsByDotPattern(cellRegions) — no NCC, no template images.
+   For each non-space cell:
+     a. Deduplicate blobs (radius < 0.5 × medRadius → noise; within-cell dedup).
+     b. Y-cluster ALL dots to assign row positions (top/mid/bot = rowIdx 0/1/2).
+     c. Find column split: largest X-gap among dots.
+        If gap > medRadius × 2.4 → colMidX = midpoint of flanking dots.
+        Else (all left col) → colMidX = max(X) + 1.
+     d. Build 6-bit pattern: for each dot, bit = colOffset + rowIdx
+        (left col: offset 0, right col: offset 3).
+     e. Lookup: DOT_PATTERN_TO_CHAR.get(pattern) ?? BRAILLE_PATTERN_MAP[binStr] ?? '?'.
+     f. confidence = countConfidence × colQuality (range 0.35–0.90); '?' → 0.08.
 
-7. matchCellsToTemplates(roiData, cellRegions)
-   -> matchedCells: [{ char, confidence, rowIndex, colIndex }]
-   For each cell region:
-     a. Extract cell ImageData from ROI, resize to TEMPLATE_SIZE (64 × 96 px) via bilinear scaling.
-     b. Convert to grayscale → apply Otsu binarization (_otsuBinarize).
-     c. For each of the 26 binarized templateImageData entries compute NCC:
-          ncc = Σ( (A[i] - meanA)(B[i] - meanB) ) / (stdA × stdB × N)
-     d. Best template = argmax(ncc). Accept only if best beats 2nd-best by MIN_NCC_MARGIN (0.02).
-     e. confidence = (ncc + 1) / 2  (mapped from [-1,1] to [0,1]).
-     f. If confidence < MIN_TEMPLATE_CONFIDENCE (0.42) -> char = '?' (unrecognised).
-
-8. assembleSentence(matchedCells)
+7. assembleSentence(matchedCells)
    -> { text: string, confidence: number, charCount: number }
-   Iterates matchedCells ordered by (rowIndex ASC, colIndex ASC).
-   Appends space character between rows (line break treated as word boundary).
-   Inserts space wherever a space marker was inserted in step 6.
-   Trims leading/trailing whitespace. Capitalises first letter of each sentence.
-   Returns full decoded text (may span multiple Braille rows = multiple words).
+   Ordered by (rowIndex ASC, colIndex ASC).
+   Inserts space at row boundaries and at isSpace markers.
+   Trims and capitalises first letter.
 
-9. processDetectionResult(matchedCells, 0.45)
-   -> { text, confidence, braille }
+8. processDetectionResult(matchedCells, 0.38)   [home.f7] / 0.45 [camera.f7]
+   -> { text, confidence, braille } | null
+   Calls recognizeBrailleCells — requires MIN_RECOGNIZED_RATIO (0.34) of cells recognised
+   and confidence ≥ minConfidence.
 
-10. Stability check — rolling buffer of 6 recent results
-    findConsistentResult(recentResults, 3) — need 3 matching results
+9. Stability check — rolling buffer of 6 recent results
+   findConsistentResult(recentResults, 3) — need 3 matching results
 
-11. Combine confidences:
-    final = detection × 0.3 + template_match × 0.4 + assembly × 0.3
-
-12. On stable result:
+10. On stable result:
     - navigator.vibrate(100)
     - showDetectionAlert() dialog (Copy / Close buttons)
     - ALERT_COOLDOWN_MS = 30000 (same message not re-alerted for 30 s)
@@ -314,13 +314,17 @@ videoEl.load();  // Critical for Android WebView — triggers source processing
 - **Flip Camera**: Stop all tracks -> update `facingMode` -> call `requestCamera()` again
 - **Grayscale overlay**: CSS `filter: grayscale(100%)` on the `<video>` element (toggle)
 
-### Cleanup (`$onBeforeUnmount`)
+### Cleanup (`$on('pageBeforeRemove', ...)` — NOT `$onBeforeUnmount`)
 ```javascript
-clearInterval(processingInterval);
-stream.getTracks().forEach(track => track.stop());
-videoEl.srcObject = null;
-$store.dispatch('setCameraActive', false);
-$store.dispatch('setDetecting', false);
+$on('pageBeforeRemove', () => {
+  clearInterval(processingInterval);
+  if (_ttsResumeTimer) { clearInterval(_ttsResumeTimer); _ttsResumeTimer = null; }
+  if (_ttsUtterance)   { window.speechSynthesis.cancel(); _ttsUtterance = null; }
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (videoEl) { videoEl.srcObject = null; }
+  $store.dispatch('setCameraActive', false);
+  $store.dispatch('setDetecting',    false);
+});
 ```
 
 ---
@@ -395,14 +399,11 @@ cd cordova && cordova build android
 ```
 src/
 |-- app.f7                    # Root app component - single <div id="app"> with main view
-|-- index.html                # Entry HTML
+|-- index.html                # Entry HTML (loads OpenCV.js <script> tag from CDN)
 |-- assets/
-|   |-- braille-originals/    # Original reference JPGs (A.jpg – Z.jpg) — not loaded at runtime
-|   |-- braille-templates/    # 26 active template PNGs (a.png – z.png at 64×96 px)
-|   |   |-- a.png  b.png  c.png  d.png  e.png  f.png  g.png
-|   |   |-- h.png  i.png  j.png  k.png  l.png  m.png  n.png
-|   |   |-- o.png  p.png  q.png  r.png  s.png  t.png  u.png
-|   |   |-- v.png  w.png  x.png  y.png  z.png
+|   |-- braille-originals/    # Original reference JPGs — not loaded at runtime
+|   |-- braille-templates/    # PNG files exist on disk but NOT used by current detector
+|   |-- sample.jpeg           # "HELLO WORLD" embossed test image (imported in home.f7)
 |-- components/
 |   |-- EmptyState.f7         # Reusable empty state component
 |-- css/
@@ -414,7 +415,7 @@ src/
 |   |-- filled.css / outlined.css / round.css / sharp.css / two-tone.css
 |   |-- _variables.scss / _mixins.scss
 |-- js/
-|   |-- app.js                # Framework7 initialization entry point
+|   |-- app.js                # Framework7 init; also registers service worker (production)
 |   |-- routes.js             # All app routes
 |   |-- store.js              # Framework7 createStore - full app state
 |   |-- cordova-app.js        # Cordova lifecycle handlers
@@ -422,27 +423,31 @@ src/
 |   |-- camera/
 |   |   |-- frame-capture.js  # captureFrame(), extractCenterROI(), toGrayscale(), applyThreshold()
 |   |-- detection/
-|   |   |-- simple-braille-detector.js  # PRIMARY: Template-photo OCR detector
-|   |   |                               # exports: assessImageQuality, detectBrailleDots,
-|   |   |                               #          segmentCellRegions, matchCellsToTemplates,
-|   |   |                               #          assembleSentence, initializeDetector,
-|   |   |                               #          templatesAreSynthetic, templatesMissingCount
-|   |   |-- braille-detector.js         # ALTERNATIVE: OpenCV.js detector (not active)
+|   |   |-- simple-braille-detector.js  # PRIMARY: OpenCV.js + dot-pattern OCR
+|   |   |                               # exports: initializeDetector, assessImageQuality,
+|   |   |                               #          detectBrailleDots, segmentCellRegions,
+|   |   |                               #          matchCellsToTemplates, matchCellsByDotPattern,
+|   |   |                               #          assembleSentence, groupIntoCells (legacy),
+|   |   |                               #          templatesAreSynthetic=false, templatesMissingCount=0
+|   |   |-- braille-detector.js         # Unused alternative detector (not imported anywhere)
 |   |-- processing/
-|   |   |-- image-enhance.js  # increaseContrast(), adjustBrightness(), unsharpMask(), preprocessForBraille()
-|   |   |-- template-loader.js  # loadImage(), renderToGrayscaleImageData(), computeNCC(), resizeImageData()
+|   |   |-- image-enhance.js  # increaseContrast(), adjustBrightness(), unsharpMask(),
+|   |   |                     # percentileStretch(), preprocessForBraille()
+|   |   |-- template-loader.js  # Utility: loadImage(), renderToGrayscaleImageData(),
+|   |   |                       # computeNCC(), resizeImageData(), loadAllTemplates()
+|   |   |                       # (not actively used by primary detector)
 |   |-- recognition/
 |   |   |-- pattern-matcher.js  # recognizeBrailleCells(), processDetectionResult(),
 |   |   |                       # findConsistentResult(), isLikelyGibberishText()
 |   |-- utils/
 |       |-- braille-mappings.js  # TEMPLATE_CHARS, CHAR_DOT_PATTERNS, DOT_PATTERN_TO_CHAR,
-|       |                        # grade1Mapping, brailleToText(), createBrailleFromDots(), etc.
+|       |                        # BRAILLE_PATTERN_MAP, grade1Mapping, brailleToText(), etc.
 |       |-- throttle.js          # throttle(), debounce(), createStabilityChecker()
 |-- pages/
-    |-- preloader.f7   # Splash + async template loading (initializeDetector) -> /home/
+    |-- preloader.f7   # Splash + initializeDetector (OpenCV WASM) -> /home/
     |-- home.f7        # Main menu + photo upload + crop + permissions + history
-    |-- camera.f7      # Live scanning (full template-OCR pipeline)
-    |-- settings.f7    # App settings (sensitivity, dark mode, text size, TTS, sound)
+    |-- camera.f7      # Live scanning (full dot-pattern OCR pipeline)
+    |-- settings.f7    # App settings (sensitivity, dark mode, text size, TTS, sound, clear history)
     |-- about.f7       # App info
     |-- 404.f7         # Not found
 ```
@@ -451,11 +456,13 @@ src/
 
 ## `app.js` Initialization
 ```javascript
+import $ from 'dom7';
 import Framework7, { getDevice } from './framework7-custom.js';
 import routes from './routes.js';
 import store from './store.js';
 import App from '../app.f7';
 
+const device = getDevice();
 const app = new Framework7({
   name: 'Braille',
   theme: 'auto',          // Automatic iOS/MD theme detection
@@ -463,6 +470,8 @@ const app = new Framework7({
   component: App,
   store,
   routes,
+  // PWA service worker (production only)
+  serviceWorker: process.env.NODE_ENV === 'production' ? { path: '/service-worker.js' } : {},
   input: {
     scrollIntoViewOnFocus: device.cordova,
     scrollIntoViewCentered: device.cordova,
@@ -483,12 +492,12 @@ const app = new Framework7({
 
 ## Template Character Set & Braille Mappings (`src/js/utils/braille-mappings.js`)
 
-### 26 Supported Characters (Template-OCR Set)
+### 26 Supported Characters (Dot-Pattern OCR Set)
 
-| Group | Characters | Count | Template files |
-|-------|-----------|-------|---------------|
-| Lowercase letters | `a` – `z` | 26 | `a.png` → `z.png` |
-| **Total** | | **26** | |
+| Group | Characters | Count |
+|-------|-----------|-------|
+| Lowercase letters | `a` – `z` | 26 |
+| **Total** | | **26** |
 
 > **Space** is not a template — it is inferred from the gap between cells (gap > 1.8 × estCellW).
 
@@ -508,14 +517,15 @@ bit 0 = dot 1 · bit 1 = dot 2 · bit 2 = dot 3
 bit 3 = dot 4 · bit 4 = dot 5 · bit 5 = dot 6
 ```
 
-### Key Functions
+### Key Exports
 ```javascript
 TEMPLATE_CHARS           // Array of 26 chars: ['a','b',...,'z']
 CHAR_DOT_PATTERNS        // { a: 0b000001, b: 0b000011, ... }  char -> 6-bit dot mask
                          // bit 0=dot1(L-top), 1=dot2(L-mid), 2=dot3(L-bot)
                          // bit 3=dot4(R-top), 4=dot5(R-mid), 5=dot6(R-bot)
-DOT_PATTERN_TO_CHAR      // Map<number, string>  6-bit pattern -> char (letters beat digits)
-charToTemplateName(ch)   // e.g. 'a' -> 'a.png'
+DOT_PATTERN_TO_CHAR      // Map<number, string>  6-bit integer -> char (letters beat digits)
+BRAILLE_PATTERN_MAP      // { '100000':'a', '110000':'b', ... }  LSB-first 6-char string -> char
+                         // Used by matchCellsByDotPattern for secondary lookup
 grade1Mapping            // { '\u2801': 'a', ... }  Braille Unicode -> text char
 textToBraille            // { 'a': '\u2801', ... }  text char -> Braille Unicode (reverse map)
 brailleToText(str)       // Converts Braille Unicode string to plain text
@@ -530,26 +540,31 @@ createBrailleFromDots(dotNumbers[])  // e.g. [1,2] -> '\u2803' (b)
 
 ### Confidence Thresholds
 ```javascript
-MIN_TEMPLATE_CONFIDENCE  = 0.42;  // NCC confidence mapped to [0,1]; below this -> '?' (unrecognised)
-MIN_CELL_CONFIDENCE      = 0.42;  // Used in recognizeBrailleCells fallback check
-MIN_RECOGNIZED_RATIO     = 0.34;  // Fraction of cells that must be recognised in a result
-// (in simple-braille-detector.js)
-MIN_NCC_MARGIN           = 0.02;  // Best NCC must beat 2nd-best by this margin
+MIN_TEMPLATE_CONFIDENCE  = 0.40;  // dot-pattern confidence below this -> '?' (in simple-braille-detector.js)
+MIN_CELL_CONFIDENCE      = 0.42;  // used by recognizeBrailleCells
+MIN_RECOGNIZED_RATIO     = 0.34;  // fraction of cells that must be recognised
+// MIN_NCC_MARGIN has been removed — NCC is no longer used
 ```
 
 ### Key Functions
 ```javascript
+// In simple-braille-detector.js:
+matchCellsByDotPattern(cellRegions)
+  // For each cell: Y-cluster dots → assign row positions → find column split via
+  // largest X-gap → build 6-bit integer → lookup DOT_PATTERN_TO_CHAR / BRAILLE_PATTERN_MAP
+  // -> Array<{ char, confidence, rowIndex, colIndex, isSpace, dotPattern }>
+
 matchCellsToTemplates(roiData, cellRegions)
-  // For each cellRegion: extract -> resize to 64x96 -> grayscale -> _otsuBinarize
-  // -> NCC against all 26 binarized templates
-  // Best match must exceed 2nd-best by MIN_NCC_MARGIN
-  // -> matchedCells: [{ char, confidence, rowIndex, colIndex }]
+  // Thin wrapper around matchCellsByDotPattern(). roiData is unused (kept for API compat).
+  // -> Array<{ char, confidence, rowIndex, colIndex, isSpace, dotPattern }>
 
 assembleSentence(matchedCells)
   // Orders matchedCells by (rowIndex ASC, colIndex ASC)
-  // Inserts spaces at word gaps; inserts space between rows
+  // Inserts spaces at isSpace markers and row boundaries
+  // Trims and capitalises first letter
   // -> { text: string, confidence: number, charCount: number }
 
+// In pattern-matcher.js:
 recognizeBrailleCells(cells)
   // -> { text: string, confidence: number, cellCount: number }
 
@@ -562,38 +577,37 @@ findConsistentResult(recentResults[], requiredMatches = 3)
 
 isLikelyGibberishText(text, matchedCells)
   // Returns true if result looks like noise/random characters.
-  // Checks: >50% unrecognised cells, avg confidence <0.25, word-length
-  // distribution anomalies, excessive space/char ratio.
+  // Checks: >50% unrecognised ('?') cells, avg confidence <0.25,
+  // word-length distribution anomalies, excessive space/char ratio.
   // -> boolean
 ```
 
-### Template Matching — NCC Algorithm
-Both the cell and the template are **Otsu-binarized** before NCC. This makes comparison purely structural (dot positions only), invariant to lighting and embossing depth:
-```javascript
-// A = binarized cell ImageData (64×96, 0=dot, 255=bg)
-// B = binarized template ImageData (64×96, 0=dot, 255=bg)
-ncc = Σ( (A[i] - meanA)(B[i] - meanB) ) / (stdA × stdB × N)
-confidence = (ncc + 1) / 2   // maps [-1,1] -> [0,1]
+### Dot-Pattern Recognition Algorithm
+No NCC. No template images. Pure geometric analysis of detected dot centroids:
 ```
-Best match is `argmax(confidence)`. Accepted only if:
-- `confidence >= MIN_TEMPLATE_CONFIDENCE (0.42)` AND
-- `best_ncc - second_best_ncc >= MIN_NCC_MARGIN (0.02)`
-
-Otherwise cell is marked `'?'`.
+1. Deduplicate blobs: radius < 0.5 × medRadius → discard; within DEDUP_DIST (cell.h × 0.20) → keep largest.
+2. Y-cluster ALL dots by threshold (cell.h × 0.30) → up to 3 row groups (top/mid/bot).
+3. Find largest X-gap among all dots. If gap > medRadius × 2.4 → two columns.
+   colMidX = midpoint of flanking dots.  Else → colMidX = max(x) + 1 (all left col).
+4. Build 6-bit pattern:
+   bit = colOffset + rowIdx  where  left→offset=0, right→offset=3
+5. Lookup: DOT_PATTERN_TO_CHAR.get(pattern)  →  then fallback BRAILLE_PATTERN_MAP[binStr]  →  '?'
+6. Confidence by dot count: 1→0.35, 2→0.52, 3→0.68, 4+→0.78. '?'→0.08.
+```
 
 ## Sentence Assembly Rules
 1. Characters ordered left-to-right within each detected row.
 2. Rows processed top-to-bottom (by ascending `rowIndex`).
-3. Horizontal gap > 1.8 × `estCellW` between consecutive cells in the same row → insert `' '` (word space).
-4. Every row boundary → insert `' '` (treat line break as word separator).
+3. Horizontal gap > 1.8 × `estCellW` between consecutive cells → `isSpace` marker → `' '` in output.
+4. Every row boundary → `' '` (treat Braille line break as word separator).
 5. Resulting string is trimmed and the first letter capitalised.
-6. Unrecognised cells (confidence < `MIN_TEMPLATE_CONFIDENCE`) are marked `'?'` and excluded from the output string.
+6. Unrecognised cells are marked `'?'` in `matchCellsByDotPattern`; `assembleSentence` includes `'?'` characters as-is in the output string.
 
 ---
 
 ## Template Loader (`src/js/processing/template-loader.js`)
 
-Responsible for loading all 26 reference photos at startup and producing normalised `ImageData` used by the NCC matcher.
+Utility file that **exists on disk but is not actively called by the primary detector** (`simple-braille-detector.js` no longer uses NCC or template images). Functions remain available for future use or external callers.
 
 ### Key Functions
 ```javascript
@@ -614,12 +628,9 @@ resizeImageData(imageData, targetW, targetH)
 loadAllTemplates(templateMap, targetW, targetH)
   // templateMap: { char: importedSrc, ... }
   // -> Promise<{ [char: string]: ImageData }>
-```
 
-### Canonical Template Size
-```javascript
-export const TEMPLATE_W = 64;   // pixels — 2-column Braille cell width
-export const TEMPLATE_H = 96;   // pixels — 3-row Braille cell height
+export const TEMPLATE_W = 64;   // pixels
+export const TEMPLATE_H = 96;   // pixels
 ```
 
 ---
@@ -660,9 +671,13 @@ unsharpMask(imageData, amount = 2.5, blurRadius = 5)
 preprocessForBraille(imageData, isEmbossed = false)
   // Full pipeline:
   //   1. RGB → grayscale float array
-  //   2a. Embossed path: global percentile stretch [p2, p98] → [0, 255]
-  //                      then unsharpMask(amount=2.5, radius=5)
+  //   2a. Embossed path: percentileStretch [p2, p98] → [0, 255]
+  //                      then unsharpMask(amount=1.2, radius=5)  ← gentle, reduced from 2.5
   //   2b. Non-embossed:  increaseContrast(factor=1.5)
+  // NOTE: preprocessForBraille(embossed=true) is NOT called by either detection path.
+  //   Canvas embossed path → percentileStretch() directly.
+  //   OpenCV embossed path → percentileStretch() directly.
+  //   Only non-embossed Canvas path calls preprocessForBraille(imageData, false).
   // -> ImageData (grayscale)
 ```
 
@@ -676,8 +691,10 @@ In addition to "Start Scanning", the home page has a photo upload option:
 <button @click=${triggerPhotoPicker}>Upload Photo to Text</button>
 <input type="file" accept="image/*" @change=${handlePhotoUpload} id="photo-upload-input" />
 ```
-Processing: load image → **interactive crop step** → draw cropped area to canvas → full template-OCR pipeline:
+Processing: load image → **interactive crop step** → draw cropped area to canvas → full dot-pattern OCR pipeline:
 `assessImageQuality()` → `detectBrailleDots()` → `segmentCellRegions()` → `matchCellsToTemplates()` → `assembleSentence()`
+
+A "Try Hello World Sample" button exists in the template but is **commented out**.
 
 After pipeline: `isLikelyGibberishText()` is called — if the result looks like noise it is discarded.
 
@@ -721,17 +738,15 @@ The last 5 items from `$store.getters.detectionHistory` are shown in a media lis
 ---
 
 ## Preloader Page (`preloader.f7`)
-- Calls `initializeDetector()` from `simple-braille-detector.js` — **async**: attempts to load all 26 template PNG images via glob. Falls back to synthetic dot-pattern images for any missing files.
+- Calls `initializeDetector()` from `simple-braille-detector.js` — **async**: waits for OpenCV.js WASM to finish loading (polls global `cv` variable, 15 s timeout).
 - Animates progress bar 0→80% during loading (20% per 100 ms tick), then jumps to 100% on resolve.
-- Sets `$f7.data.detectorReady = true` after the promise resolves.
-- Shows a **yellow warning banner** (`synthWarning`) when `templatesMissingCount > 0`, listing how many characters use synthetic fallbacks and prompting the user to add the missing PNG files.
+- Sets `$f7.data.detectorReady = true` and dispatches `setTemplatesLoaded(true)` after the promise resolves.
 - Status text variants:
-  - `'Ready!'` — all 26 real photos loaded
-  - `'Ready (N synthetic)'` — N chars use fallback
-  - `'Ready (synthetic templates)'` — all 26 are synthetic
-  - `'Failed to load templates.'` — unexpected error
-- Navigates to `/home/` after **1800 ms** when `synthWarning` is true, otherwise **300 ms**.
-- Shows retry button on error.
+  - `'Ready!'` — OpenCV loaded successfully (or timed out with Canvas fallback active)
+  - `'Initialization failed.'` — unexpected error
+- No `synthWarning` or template-count banner — those were part of the old template-photo approach.
+- Navigates to `/home/` after **300 ms** on success.
+- Shows **Retry** button on error.
 
 ---
 
@@ -742,6 +757,7 @@ The last 5 items from `$store.getters.detectionHistory` are shown in a media lis
 - **Text Size**: `<input type="range" min="12" max="24" step="2">` -> `updateSettings({ textSize })`
 - **Text-to-Speech**: toggle -> `updateSettings({ textToSpeechEnabled })`
 - **Sound Effects**: toggle -> `updateSettings({ soundEffectsEnabled })`
+- **Clear Detection History**: `$f7.dialog.confirm(...)` → `$store.dispatch('clearHistory')`
 
 ---
 
@@ -799,32 +815,48 @@ import { throttle } from '../js/utils/throttle.js';
 
 ### Detection Alert Dialog
 ```javascript
-$f7.dialog.create({
+activeDetectionDialog = $f7.dialog.create({
   title: 'Braille Detected',
-  text: detectedText,
+  text,
   buttons: [
-    { text: 'Copy', bold: true, onClick: () => copyDetectedString(text) },
-    { text: 'Close' }
+    {
+      text: 'Copy', bold: true,
+      onClick: () => navigator.clipboard.writeText(text).then(() =>
+        $f7.toast.show({ text: 'Copied!', closeTimeout: 1500 })
+      ),
+    },
+    { text: 'Close' },
   ],
   on: {
     closed: () => {
-      isDetectionPaused = false;
+      activeDetectionDialog = null;
+      isDetectionPaused     = false;
       recentRecognitionResults = [];
-      scanningStatus = 'Resuming scan... align Braille in center guide';
-    }
-  }
+      scanningStatus = 'Resuming scan... align Braille in centre guide';
+      $update();
+    },
+  },
 });
+activeDetectionDialog.open();
 ```
 
-### Text-to-Speech
+### Text-to-Speech (camera page: `_doTTS(text)`, home page: `speakText(text)`)
+Both pages implement the same TTS pattern with Android WebView workarounds:
 ```javascript
-const utterance = new SpeechSynthesisUtterance(detectedText);
-window.speechSynthesis.speak(utterance);
+// Retain utterance reference to prevent GC on Android
+_ttsUtterance = new SpeechSynthesisUtterance(text);
+_ttsUtterance.rate = 0.9; _ttsUtterance.pitch = 1.0; _ttsUtterance.volume = 1.0;
+// Prefer local English voice
+// Periodic resume() timer prevents Android WebView 14 s pause bug
+window.speechSynthesis.speak(_ttsUtterance);
+// Always use 150ms settle delay after cancel() on Android
 ```
 
 ### Clipboard Copy
 ```javascript
-navigator.clipboard.writeText(text).then(() => showToast('Text copied to clipboard'));
+navigator.clipboard.writeText(text).then(() =>
+  $f7.toast.show({ text: 'Text copied to clipboard', closeTimeout: 2000 })
+);
 ```
 
 ### Vibration on New Detection
@@ -1196,33 +1228,33 @@ import MyComponent from '../components/MyComponent.f7';
 8. **Max 3 levels CSS nesting** — minimise specificity
 9. **Use `$h` for arrays** — always wrap `.map()` in `$h` tagged template literals
 10. **Material Icons only** — never Framework7 Icons
-11. **Import assets via ES6** — never direct paths in `src` attributes. Template PNGs are loaded via **`import.meta.glob()`** in `simple-braille-detector.js` (not individual static imports). All other assets (sample images, etc.) must use ES6 `import`.
+11. **Import assets via ES6** — never direct paths in `src` attributes. `sample.jpeg` is imported in `home.f7` via ES6 `import`. No asset glob is used by the current detector.
 12. **Self-closing void elements** — always include `/>`
-13. **Primary detector is `simple-braille-detector.js` with template-photo OCR** — do not switch to OpenCV (`braille-detector.js`) unless explicitly requested; do not revert to dot-counting-only recognition
-14. **All 26 template images must be loaded before scanning starts** — `initializeDetector()` is async and must fully resolve before any frame is processed; preloader page awaits this promise
+13. **Primary detector is `simple-braille-detector.js` with OpenCV.js dot-pattern OCR** — uses `cv.findContours` + 6-bit pattern lookup; do NOT switch to the old `braille-detector.js`; do NOT reintroduce NCC template matching unless explicitly requested
+14. **`initializeDetector()` must resolve before scanning** — it waits for OpenCV.js WASM; preloader awaits this. If OpenCV times out after 15 s, the Canvas fallback becomes active — scanning STILL works.
 15. **Frame stability required** — always use `findConsistentResult()` before displaying detected text; never display single-frame results directly
-16. **Quality gate always first** — always call `assessImageQuality()` before detection; skip frames below threshold
+16. **Quality gate always first** — always call `assessImageQuality()` before detection; skip frames where `!isAcceptable && !embossed`
 17. **Permission handling order** — always check Cordova `permissions` plugin first (Android), fall back to `getUserMedia` for web/iOS
 18. **Throttle frame processing** — use `throttle()` utility; never process every single animation frame
 19. **Alert cooldown** — respect `ALERT_COOLDOWN_MS = 30000` to avoid spam-alerting for the same detected text
 20. **Multi-character sentence output** — the pipeline must always process the **entire ROI**, not just the first detected cell; `assembleSentence()` must concatenate all matched cells across all rows into a single output string
-21. **Template size is canonical** — always resize cell regions to exactly 64 × 96 px before NCC comparison; never compare at original scale
-22. **Word-space detection is mandatory** — always run gap analysis in `segmentCellRegions()` to insert spaces between words; do not rely solely on Braille space cell (U+2800) detection
+21. **`segmentCellRegions` call signature** — call as `segmentCellRegions(roiData, dots)` — cell size is estimated internally; do NOT pass raw `estCellW`/`estCellH` from outside unless you have a specific reason
+22. **Word-space detection is mandatory** — always run gap analysis in `segmentCellRegions()` to insert `isSpace` markers between words; these become spaces in `assembleSentence()`
+23. **Camera page lifecycle** — use `$on('pageBeforeRemove', ...)` for cleanup; do NOT use `$onBeforeUnmount` (not a valid Framework7 Router Component hook)
 
 ---
 
 ## Future Enhancements
-- Grade 2 (contracted) Braille support — requires expanded template set beyond 26 base characters
-- Non-English Braille systems (French, Spanish, Arabic UEB, etc.) — language-specific template packs
-- Additional punctuation template photos (`.`, `,`, `?`, `!`, `;`, `:`, `'`) and digit templates (`0`–`9`) to expand beyond the 26-letter set
-- Digit recognition — add `0.png`–`9.png` templates and restore digit entries in `braille-mappings.js`
-- TensorFlow.js CNN model to replace NCC template matching for higher accuracy on embossed/worn Braille
-- Template capture tool — in-app guided flow to photograph and register custom Braille templates
-- PWA offline mode with service worker (template assets pre-cached)
-- Detection history page with timestamps, copy, and per-result character breakdown
-- User feedback loop — thumbs up/down per detection to refine template confidence thresholds
-- Torch/flashlight availability detection before showing button
-- Freeze/capture frame for detailed cell-by-cell review with character overlays
-- Adjustable ROI size (centre guide box) in settings
-- Confidence threshold slider in settings (maps to `MIN_TEMPLATE_CONFIDENCE`)
-- Multi-language sentence output with auto-detected locale
+- **Digit recognition** — add digit entries to `BRAILLE_PATTERN_MAP` and `DOT_PATTERN_TO_CHAR` (digits share dot patterns with a–j in Grade 1; number sign prefix cell U+283C needed for disambiguation)
+- **Grade 2 (contracted) Braille** — requires a contraction lookup table applied after sequence assembly
+- **Non-English Braille systems** (French, Spanish, Arabic UEB, etc.) — swap `BRAILLE_PATTERN_MAP` with locale-specific variant
+- **Additional punctuation** — add `;`, `:`, `'`, `-`, `"` entries to `BRAILLE_PATTERN_MAP`
+- **TensorFlow.js CNN model** — replace dot-pattern lookup with on-device ML for higher accuracy on worn/embossed Braille
+- **Template capture tool** — in-app guided flow to optionally re-enable the NCC template path with user-captured photos
+- **Confidence threshold slider in settings** — maps to `MIN_CELL_CONFIDENCE` in `pattern-matcher.js`
+- **Detection history page** — full history with timestamps and per-result character breakdown
+- **Freeze/capture frame** — for detailed cell-by-cell review with character overlays
+- **Adjustable ROI size** — expose `extractCenterROI` width/height ratios as settings
+- **Torch/flashlight availability detection** — show button only when `capabilities.torch` is present
+- **Multi-language sentence output** — auto-detected locale post-processing
+- **PWA offline mode** — service worker already registered in production; add pre-cache of detector assets
