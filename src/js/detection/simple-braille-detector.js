@@ -729,8 +729,10 @@ export function matchCellsByDotPattern(cellRegions) {
     _yClusterAndAssign(rightDots, 3);
 
     // ── Lookup: DOT_PATTERN_TO_CHAR (numeric bitmask, letters-first order)
-    //           then BRAILLE_PATTERN_MAP (binary string, includes punctuation)
-    const binStr   = pattern.toString(2).padStart(6, '0');
+    //           then BRAILLE_PATTERN_MAP (binary string LSB-first: pos0=dot1…pos5=dot6)
+    // pattern integer: bit0=dot1, bit1=dot2, …, bit5=dot6
+    // toString(2).padStart(6,'0') gives MSB-first → must reverse for BRAILLE_PATTERN_MAP keys
+    const binStr   = pattern.toString(2).padStart(6, '0').split('').reverse().join('');
     const bestChar = DOT_PATTERN_TO_CHAR.get(pattern)
                   ?? BRAILLE_PATTERN_MAP[binStr]
                   ?? '?';
@@ -738,7 +740,7 @@ export function matchCellsByDotPattern(cellRegions) {
     console.log(
       `[DotPattern] r${cell.rowIndex}c${cell.colIndex}: ${dedupedDots.length} dots,`,
       `L=${leftDots.length} R=${rightDots.length}, gap=${bestGap.toFixed(1)},`,
-      `pattern=${pattern.toString(2).padStart(6,'0')} → '${bestChar}'`
+      `pattern=${binStr} → '${bestChar}'`
     );
 
     const dotCount = dedupedDots.length;
