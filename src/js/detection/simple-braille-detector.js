@@ -149,46 +149,54 @@ export async function initializeDetector() {
   if (_opencvReady) return;
 
   return new Promise((resolve) => {
-    import('@techstark/opencv-js').then((module) => {
-      const cvExport = module.default ?? module;
-
-      const onReady = (cvInstance) => {
-        _cv          = cvInstance;
-        _opencvReady = true;
-        console.info('[BrailleDetector] OpenCV.js ready — using cv.findContours dot detection');
-        resolve();
-      };
-
-      // Pattern A: cv object is already initialised (most Vite bundled builds)
-      if (cvExport && typeof cvExport.Mat === 'function') {
-        onReady(cvExport);
-        return;
-      }
-
-      // Pattern B: factory function — call it to get the cv instance
-      if (typeof cvExport === 'function') {
-        cvExport().then(onReady).catch(() => {
-          console.warn('[BrailleDetector] OpenCV factory call failed — Canvas fallback active');
-          resolve();
-        });
-        return;
-      }
-
-      // Pattern C: WASM runtime init callback
-      cvExport.onRuntimeInitialized = () => onReady(cvExport);
-
-      // 10 s timeout — resolve without OpenCV so the app still works
-      setTimeout(() => {
-        if (!_opencvReady) {
-          console.warn('[BrailleDetector] OpenCV init timed out — Canvas fallback active');
-          resolve();
-        }
-      }, 10000);
-
-    }).catch((err) => {
-      console.warn('[BrailleDetector] OpenCV.js import failed — Canvas fallback active:', err.message);
+    /**
+     * Wait for the global `cv` object to be populated by the async OpenCV.js
+     * script tag in index.html (https://docs.opencv.org/4.9.0/opencv.js).
+     *
+     * Three possible states:
+     *  A. cv already fully initialised (fast path — script loaded early)
+     *  B. cv object exists but WASM still loading — attach onRuntimeInitialized
+     *  C. cv not yet in scope — poll with setInterval until the script tag sets it
+     */
+    const onReady = () => {
+      _cv          = cv; // eslint-disable-line no-undef
+      _opencvReady = true;
+      console.info('[BrailleDetector] OpenCV.js ready — using cv.findContours dot detection');
       resolve();
-    });
+    };
+
+    // Check if already ready (Pattern A)
+    if (typeof cv !== 'undefined' && cv.Mat) { // eslint-disable-line no-undef
+      onReady();
+      return;
+    }
+
+    // Check if cv exists but onRuntimeInitialized hook needed (Pattern B)
+    if (typeof cv !== 'undefined') { // eslint-disable-line no-undef
+      cv.onRuntimeInitialized = onReady; // eslint-disable-line no-undef
+    }
+
+    // Poll for cv global — set by the async <script> tag (Pattern C)
+    const poll = setInterval(() => {
+      if (typeof cv === 'undefined') return; // eslint-disable-line no-undef
+      clearInterval(poll);
+      clearTimeout(timeout);
+      if (cv.Mat) { // eslint-disable-line no-undef
+        onReady();
+      } else {
+        // WASM still initialising
+        cv.onRuntimeInitialized = onReady; // eslint-disable-line no-undef
+      }
+    }, 200);
+
+    // 15 s timeout — resolve without OpenCV so the app still works
+    const timeout = setTimeout(() => {
+      clearInterval(poll);
+      if (!_opencvReady) {
+        console.warn('[BrailleDetector] OpenCV.js did not load in 15 s — Canvas fallback active');
+        resolve();
+      }
+    }, 15000);
   });
 }
 
