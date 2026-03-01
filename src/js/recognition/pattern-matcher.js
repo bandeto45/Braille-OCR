@@ -87,6 +87,38 @@ export function findConsistentResult(recentResults, requiredMatches = 3) {
   return bestGroup.reduce((best, r) => r.confidence > best.confidence ? r : best);
 }
 
+/**
+ * Heuristic check: returns true if the recognised text looks like random noise.
+ * @param {string} text
+ * @param {Array<{char, confidence, isSpace}>} matchedCells
+ * @returns {boolean}
+ */
+export function isLikelyGibberishText(text, matchedCells) {
+  if (!text || text.length < 1) return true;
+
+  const realCells = matchedCells ? matchedCells.filter(c => !c.isSpace) : [];
+  if (realCells.length === 0) return true;
+
+  const unrecognized = realCells.filter(c => c.char === '?').length;
+  if (unrecognized / realCells.length > 0.5) return true;
+
+  const avgConf = realCells.reduce((s, c) => s + c.confidence, 0) / realCells.length;
+  if (avgConf < 0.25) return true;
+
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length >= 5) {
+    const avgWordLen = words.reduce((sum, word) => sum + word.length, 0) / words.length;
+    const shortWordRatio = words.filter(word => word.length <= 2).length / words.length;
+    if (avgWordLen < 2.4 && shortWordRatio > 0.55) return true;
+  }
+
+  const charCount = text.replace(/\s+/g, '').length;
+  const spaceCount = (text.match(/\s/g) || []).length;
+  if (charCount > 0 && (spaceCount / charCount) > 0.35) return true;
+
+  return false;
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 // Minimal grade1Mapping (text char → Braille Unicode codepoint)
 const _BRAILLE_CODES = {

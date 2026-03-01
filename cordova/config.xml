@@ -1,5 +1,5 @@
 <?xml version='1.0' encoding='utf-8'?>
-<widget id="io.braille.app" version="1.0.0" xmlns="http://www.w3.org/ns/widgets" xmlns:cdv="http://cordova.apache.org/ns/1.0">
+<widget id="io.braille.app" version="1.0.0" xmlns="http://www.w3.org/ns/widgets" xmlns:cdv="http://cordova.apache.org/ns/1.0" xmlns:android="http://schemas.android.com/apk/res/android">
     <name>Braille</name>
     <description>
         Braille OCR — template-based Braille recognition using the device camera.
@@ -14,33 +14,25 @@
     <allow-navigation href="*" />
 
     <!-- ── Plugins ──────────────────────────────────────────────────────── -->
-    <plugin name="cordova-plugin-camera" spec="^7.0.0" />
     <plugin name="cordova-plugin-android-permissions" spec="^1.1.5" />
-    <plugin name="cordova-plugin-media-capture" spec="^4.0.0" />
+    <plugin name="cordova-plugin-statusbar" spec="^4.0.0" />
+    <plugin name="cordova-plugin-keyboard" spec="^1.3.0" />
+
 
     <platform name="android">
       <preference name="StatusBarOverlaysWebView" value="false" />
       <preference name="android-minSdkVersion" value="24" />
+      <preference name="MediaPlaybackRequiresUserAction" value="false" />
 
-      <!-- Camera & media permissions -->
-      <uses-permission android:name="android.permission.CAMERA" />
-      <uses-permission android:name="android.permission.RECORD_AUDIO" />
-      <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-      <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
-      <uses-feature android:name="android.hardware.camera" android:required="false" />
-      <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
-      <uses-feature android:name="android.hardware.camera.front" android:required="false" />
-      <preference name="SplashMaintainAspectRatio" value="true" />
-      <splash density="land-hdpi" src="res/screen/android/drawable-hdpi/screen.png" />
-      <splash density="land-mdpi" src="res/screen/android/drawable-mdpi/screen.png" />
-      <splash density="land-xhdpi" src="res/screen/android/drawable-xhdpi/screen.png" />
-      <splash density="land-xxhdpi" src="res/screen/android/drawable-xxhdpi/screen.png" />
-      <splash density="land-xxxhdpi" src="res/screen/android/drawable-xxxhdpi/screen.png" />
-      <splash density="port-hdpi" src="res/screen/android/drawable-hdpi/screen.png" />
-      <splash density="port-mdpi" src="res/screen/android/drawable-mdpi/screen.png" />
-      <splash density="port-xhdpi" src="res/screen/android/drawable-xhdpi/screen.png" />
-      <splash density="port-xxhdpi" src="res/screen/android/drawable-xxhdpi/screen.png" />
-      <splash density="port-xxxhdpi" src="res/screen/android/drawable-xxxhdpi/screen.png" />
+      <!-- Camera & media permissions injected into AndroidManifest.xml -->
+      <config-file parent="/*" target="AndroidManifest.xml">
+        <uses-permission android:name="android.permission.CAMERA" />
+        <uses-permission android:name="android.permission.RECORD_AUDIO" />
+        <uses-feature android:name="android.hardware.camera" android:required="false" />
+        <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+        <uses-feature android:name="android.hardware.camera.front" android:required="false" />
+      </config-file>
+
       <icon density="ldpi" src="res/icon/android/mipmap-ldpi/ic_launcher.png" />
       <icon density="mdpi" src="res/icon/android/mipmap-mdpi/ic_launcher.png" />
       <icon density="hdpi" src="res/icon/android/mipmap-hdpi/ic_launcher.png" />

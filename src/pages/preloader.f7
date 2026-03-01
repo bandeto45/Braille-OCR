@@ -12,9 +12,9 @@
       <div class="splash-status">${statusText}</div>
       ${synthWarning && $h`
         <div style="margin-top:14px;background:rgba(255,193,7,0.18);border:1px solid var(--braille-warning);border-radius:8px;padding:8px 14px;max-width:280px;text-align:center;font-size:var(--font-xs);color:var(--braille-warning);line-height:1.5;">
-          <strong>No template photos found.</strong><br/>
-          Using synthetic dot-pattern templates — accuracy may be lower.<br/>
-          Add JPG or PNG photos to <code>src/assets/braille-templates/</code> for best results.
+          <strong>Some template photos missing.</strong><br/>
+          ${templatesMissingCount} character(s) use synthetic dot-pattern fallbacks.<br/>
+          Add the missing PNG photos to <code>src/assets/braille-templates/</code> for best accuracy.
         </div>
       `}
       ${hasError && $h`
@@ -30,7 +30,7 @@
 </template>
 
 <script>
-import { initializeDetector, templatesAreSynthetic } from '../js/detection/simple-braille-detector.js';
+import { initializeDetector, templatesAreSynthetic, templatesMissingCount } from '../js/detection/simple-braille-detector.js';
 
 export default (props, { $f7, $store, $update, $on }) => {
   let progress   = 0;
@@ -55,10 +55,12 @@ export default (props, { $f7, $store, $update, $on }) => {
       clearInterval(ticker);
       ticker     = null;
       progress   = 100;
-      synthWarning = templatesAreSynthetic;
+      synthWarning = templatesMissingCount > 0;
       statusText = templatesAreSynthetic
         ? 'Ready (synthetic templates)'
-        : 'Ready!';
+        : templatesMissingCount > 0
+          ? `Ready (${templatesMissingCount} synthetic)`
+          : 'Ready!';
       $store.dispatch('setTemplatesLoaded', true);
       if (!$f7.data) $f7.data = {};
       $f7.data.detectorReady = true;

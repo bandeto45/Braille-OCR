@@ -1,12 +1,12 @@
 # Braille Project - AI Coding Agent Instructions
 
 ## Project Overview
-A mobile web application built with Framework7 v9.0.3 that scans Braille from camera images and converts it to readable text. The recognition engine uses **template-photo OCR**: 36 pre-captured reference photos of individual Braille characters (a–z plus 0–9) are stored as assets; each detected cell in a live frame or uploaded image is compared against all 36 templates using Canvas-based pixel similarity to identify the character. All matched characters are assembled left-to-right, top-to-bottom into complete words and sentences. Deployed as both a progressive web app and a Cordova-wrapped Android/iOS app. Enables sighted users to read Braille documents and helps visually impaired users digitize Braille content.
+A mobile web application built with Framework7 v9.0.3 that scans Braille from camera images and converts it to readable text. The recognition engine uses **template-photo OCR**: 26 pre-captured reference photos of individual Braille characters (a–z) are stored as assets; each detected cell in a live frame or uploaded image is compared against all 26 templates using Canvas-based pixel similarity to identify the character. All matched characters are assembled left-to-right, top-to-bottom into complete words and sentences. Deployed as both a progressive web app and a Cordova-wrapped Android/iOS app. Enables sighted users to read Braille documents and helps visually impaired users digitize Braille content.
 
 ## Tech Stack
 - **Framework**: Framework7 v9.0.3 (mobile-first web framework)
 - **Languages**: HTML, CSS/LESS, JavaScript (ES Modules)
-- **Computer Vision**: Canvas API-based (`simple-braille-detector.js`) — primary, no external libs; uses **36 reference template photos** stored in `src/assets/braille-templates/` for character-level OCR matching; `@techstark/opencv-js` ^4.12.0 — optional alternative detector
+- **Computer Vision**: Canvas API-based (`simple-braille-detector.js`) — primary, no external libs; uses **26 reference template photos** stored in `src/assets/braille-templates/` for character-level OCR matching; `@techstark/opencv-js` ^4.12.0 — optional alternative detector
 - **Camera Access**: MediaDevices API (`getUserMedia`) for web/iOS; `cordova-plugin-android-permissions` for Android permission gating
 - **Build System**: Vite ^7.3.1, `rollup-plugin-framework7` for `.f7` files, `less` for styles
 - **Mobile Wrapper**: Apache Cordova (Android + iOS targets)
@@ -82,7 +82,7 @@ state: {
   detectionHistory: [],   // Last 50 detections
   isDetecting: false,
   confidence: 0,
-  templatesLoaded: false, // true once all 36 template PNGs are loaded by initializeDetector()
+  templatesLoaded: false, // true once all 26 template PNGs are loaded by initializeDetector()
   opencvInitialized: false,
   opencvLoading: false,
   // Camera
@@ -103,16 +103,15 @@ state: {
 
 ## Detection Pipeline (Template-Photo OCR Implementation)
 
-All pages use `simple-braille-detector.js` (Canvas API only, no external CV library). Recognition is driven by **36 pre-captured Braille character reference photos** stored in `src/assets/braille-templates/`. Each detected cell region from the live frame or uploaded image is matched against all 36 templates via pixel-level similarity to identify its character. The complete pipeline extracts **all Braille codes** present—spanning one or more rows—and assembles them into a full sentence.
+All pages use `simple-braille-detector.js` (Canvas API only, no external CV library). Recognition is driven by **26 pre-captured Braille character reference photos** stored in `src/assets/braille-templates/`. Each detected cell region from the live frame or uploaded image is matched against all 26 templates via pixel-level similarity to identify its character. The complete pipeline extracts **all Braille codes** present—spanning one or more rows—and assembles them into a full sentence.
 
-### 36 Template Reference Photos
+### 26 Template Reference Photos
 
 | Set | File names | Characters |
 |-----|-----------|------------|
 | Letters | `a.png` … `z.png` | `a` – `z` (26 files) |
-| Digits | `0.png` … `9.png` | `0` – `9` (10 files) |
 
-**Total: 36 PNG files** located in `src/assets/braille-templates/`.
+**Total: 26 PNG files** located in `src/assets/braille-templates/`.
 
 Each template photo:
 - Must be a **clean, well-lit, front-facing** image of a single embossed or printed Braille cell.
@@ -124,11 +123,10 @@ Each template photo:
 ```javascript
 // src/js/detection/simple-braille-detector.js
 import templateA from '../../assets/braille-templates/a.png';
-// ... repeat for all 36 files (b.png … z.png, 0.png … 9.png)
+// ... repeat for all 26 files (b.png … z.png)
 
 const TEMPLATE_MAP = {
   a: templateA, b: templateB, /* … */ z: templateZ,
-  '0': template0, '1': template1, /* … */ '9': template9,
 };
 
 const TEMPLATE_SIZE = { w: 64, h: 96 };  // canonical cell canvas size
@@ -181,7 +179,7 @@ export async function initializeDetector() {
    For each cell region:
      a. Extract cell ImageData from ROI, resize to TEMPLATE_SIZE (64 × 96 px) via bilinear scaling.
      b. Convert to grayscale ImageData.
-     c. For each of the 36 templateImageData entries compute NCC (Normalised Cross-Correlation):
+     c. For each of the 26 templateImageData entries compute NCC (Normalised Cross-Correlation):
           ncc = Σ( (A[i] - meanA)(B[i] - meanB) ) / (stdA × stdB × N)
      d. Best template character = argmax(ncc).
      e. confidence = (ncc + 1) / 2  (mapped from [-1,1] to [0,1]).
@@ -373,13 +371,11 @@ src/
 |-- test-detection.html       # Standalone detection test page
 |-- assets/
 |   |-- braille/              # Test Braille image assets (full-document scans)
-|   |-- braille-templates/    # 36 reference template photos (64x96 px each)
+|   |-- braille-templates/    # 26 reference template photos (64x96 px each)
 |   |   |-- a.png  b.png  c.png  d.png  e.png  f.png  g.png
 |   |   |-- h.png  i.png  j.png  k.png  l.png  m.png  n.png
 |   |   |-- o.png  p.png  q.png  r.png  s.png  t.png  u.png
 |   |   |-- v.png  w.png  x.png  y.png  z.png
-|   |   |-- 0.png  1.png  2.png  3.png  4.png
-|   |   |-- 5.png  6.png  7.png  8.png  9.png
 |-- components/
 |   |-- EmptyState.f7         # Reusable empty state component
 |-- css/
@@ -411,7 +407,7 @@ src/
 |   |-- recognition/
 |   |   |-- pattern-matcher.js  # recognizeBrailleCells(), processDetectionResult(), findConsistentResult()
 |   |-- utils/
-|       |-- braille-mappings.js  # TEMPLATE_CHARS (36-char set), grade1Mapping, brailleToText(),
+|       |-- braille-mappings.js  # TEMPLATE_CHARS (26-char set), grade1Mapping, brailleToText(),
 |       |                        # createBrailleFromDots(), isValidBraille(), charToTemplateName()
 |       |-- throttle.js          # throttle(), debounce(), createStabilityChecker()
 |-- pages/
@@ -459,19 +455,17 @@ const app = new Framework7({
 
 ## Template Character Set & Braille Mappings (`src/js/utils/braille-mappings.js`)
 
-### 36 Supported Characters (Template-OCR Set)
+### 26 Supported Characters (Template-OCR Set)
 
 | Group | Characters | Count | Template files |
 |-------|-----------|-------|---------------|
 | Lowercase letters | `a` – `z` | 26 | `a.png` → `z.png` |
-| Digits | `0` – `9` | 10 | `0.png` → `9.png` |
-| **Total** | | **36** | |
+| **Total** | | **26** | |
 
 > **Space** is not a template — it is inferred from the gap between cells (gap > 1.8 × estCellW).
 
 ### Grade 1 (Uncontracted) Braille — Unicode Reference
 - Letters `a`–`z` (Unicode U+2801–U+2835)
-- Number sign `#` (U+283C) — precedes digit sequences
 - Punctuation: space (U+2800), comma `,`, period `.`, exclamation `!`, question `?`
 
 ### Cell Structure
@@ -485,8 +479,8 @@ Dot layout (2×3 grid):
 
 ### Key Functions
 ```javascript
-TEMPLATE_CHARS           // Array of 36 chars: ['a','b',...,'z','0','1',...,'9']
-charToTemplateName(ch)   // e.g. 'a' -> 'a.png', '0' -> '0.png'
+TEMPLATE_CHARS           // Array of 26 chars: ['a','b',...,'z']
+charToTemplateName(ch)   // e.g. 'a' -> 'a.png'
 grade1Mapping            // { '\u2801': 'a', ... }  Braille Unicode -> text char
 textToBraille            // { 'a': '\u2801', ... }  text char -> Braille Unicode (reverse map)
 brailleToText(str)       // Converts Braille Unicode string to plain text
@@ -509,7 +503,7 @@ MIN_RECOGNIZED_RATIO     = 0.34;  // Fraction of cells that must be recognised i
 ### Key Functions
 ```javascript
 matchCellsToTemplates(roiData, cellRegions)
-  // For each cellRegion: extract -> resize to 64x96 -> grayscale -> NCC against all 36 templates
+  // For each cellRegion: extract -> resize to 64x96 -> grayscale -> NCC against all 26 templates
   // -> matchedCells: [{ char, confidence, rowIndex, colIndex }]
 
 assembleSentence(matchedCells)
@@ -536,7 +530,7 @@ For each cell candidate vs each template:
 ncc = Σ( (A[i] - meanA)(B[i] - meanB) ) / (stdA × stdB × N)
 confidence = (ncc + 1) / 2   // maps [-1,1] -> [0,1]
 ```
-Best match is `argmax(confidence)` across all 36 templates. If `confidence < MIN_TEMPLATE_CONFIDENCE` the cell is marked `'?'`.
+Best match is `argmax(confidence)` across all 26 templates. If `confidence < MIN_TEMPLATE_CONFIDENCE` the cell is marked `'?'`.
 
 ## Sentence Assembly Rules
 1. Characters ordered left-to-right within each detected row.
@@ -544,13 +538,13 @@ Best match is `argmax(confidence)` across all 36 templates. If `confidence < MIN
 3. Horizontal gap > 1.8 × `estCellW` between consecutive cells in the same row → insert `' '` (word space).
 4. Every row boundary → insert `' '` (treat line break as word separator).
 5. Resulting string is trimmed and the first letter capitalised.
-6. Digit sequences preceded by the Braille number indicator `#` in the raw Unicode are decoded as digits.
+6. Unrecognised cells (confidence < `MIN_TEMPLATE_CONFIDENCE`) are marked `'?'` and excluded from the output string.
 
 ---
 
 ## Template Loader (`src/js/processing/template-loader.js`)
 
-Responsible for loading all 36 reference photos at startup and producing normalised `ImageData` used by the NCC matcher.
+Responsible for loading all 26 reference photos at startup and producing normalised `ImageData` used by the NCC matcher.
 
 ### Key Functions
 ```javascript
@@ -570,9 +564,9 @@ computeNCC(dataA, dataB)
   // Returns 0 if either std deviation is 0 (flat image)
 
 loadAllTemplates(templateMap, targetW, targetH)
-  // templateMap: { char: importedSrc, ... }  (36 entries)
+  // templateMap: { char: importedSrc, ... }  (26 entries)
   // -> Promise<{ [char: string]: ImageData }>
-  // Resolves when all 36 images are loaded and converted
+  // Resolves when all 26 images are loaded and converted
 ```
 
 ### Canonical Template Size
@@ -615,7 +609,7 @@ Results displayed inline showing the full decoded sentence with overall confiden
 ---
 
 ## Preloader Page (`preloader.f7`)
-- Calls `initializeDetector()` from `simple-braille-detector.js` — **async**: loads all 36 template PNG images into off-screen canvases and builds `templateImageData` map
+- Calls `initializeDetector()` from `simple-braille-detector.js` — **async**: loads all 26 template PNG images into off-screen canvases and builds `templateImageData` map
 - Animates progress bar 0→100% in 20% increments per 100 ms (progress tied to template loading callbacks)
 - Sets `$f7.data.detectorReady = true` only after the `initializeDetector()` promise resolves
 - Navigates to `/home/` after 300 ms when complete
@@ -1055,10 +1049,10 @@ import MyComponent from '../components/MyComponent.f7';
 8. **Max 3 levels CSS nesting** — minimise specificity
 9. **Use `$h` for arrays** — always wrap `.map()` in `$h` tagged template literals
 10. **Material Icons only** — never Framework7 Icons
-11. **Import assets via ES6** — never direct paths in `src` attributes; this includes all 36 template PNGs which must be individually imported in `simple-braille-detector.js`
+11. **Import assets via ES6** — never direct paths in `src` attributes; this includes all 26 template PNGs which must be individually imported in `simple-braille-detector.js`
 12. **Self-closing void elements** — always include `/>`
 13. **Primary detector is `simple-braille-detector.js` with template-photo OCR** — do not switch to OpenCV (`braille-detector.js`) unless explicitly requested; do not revert to dot-counting-only recognition
-14. **All 36 template images must be loaded before scanning starts** — `initializeDetector()` is async and must fully resolve before any frame is processed; preloader page awaits this promise
+14. **All 26 template images must be loaded before scanning starts** — `initializeDetector()` is async and must fully resolve before any frame is processed; preloader page awaits this promise
 15. **Frame stability required** — always use `findConsistentResult()` before displaying detected text; never display single-frame results directly
 16. **Quality gate always first** — always call `assessImageQuality()` before detection; skip frames below threshold
 17. **Permission handling order** — always check Cordova `permissions` plugin first (Android), fall back to `getUserMedia` for web/iOS
@@ -1071,9 +1065,10 @@ import MyComponent from '../components/MyComponent.f7';
 ---
 
 ## Future Enhancements
-- Grade 2 (contracted) Braille support — requires expanded template set beyond 36 base characters
+- Grade 2 (contracted) Braille support — requires expanded template set beyond 26 base characters
 - Non-English Braille systems (French, Spanish, Arabic UEB, etc.) — language-specific template packs
-- Additional punctuation template photos (`.`, `,`, `?`, `!`, `;`, `:`, `'`) to expand beyond 36-character set
+- Additional punctuation template photos (`.`, `,`, `?`, `!`, `;`, `:`, `'`) and digit templates (`0`–`9`) to expand beyond the 26-letter set
+- Digit recognition — add `0.png`–`9.png` templates and restore digit entries in `braille-mappings.js`
 - TensorFlow.js CNN model to replace NCC template matching for higher accuracy on embossed/worn Braille
 - Template capture tool — in-app guided flow to photograph and register custom Braille templates
 - PWA offline mode with service worker (template assets pre-cached)

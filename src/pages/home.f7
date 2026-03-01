@@ -6,16 +6,28 @@
       <div class="navbar-bg"></div>
       <div class="navbar-inner">
         <div class="navbar-right">
-          <a href="/settings/" class="link icon-only">
-            <i class="icon material-icons">settings</i>
-          </a>
-          <a href="/about/" class="link icon-only">
-            <i class="icon material-icons">info</i>
-          </a>
+          
         </div>
         <div class="title">Braille OCR</div>
       </div>
     </div>
+
+    <!-- Crop overlay -->
+    ${cropActive && $h`
+      <div style="position:fixed;inset:0;z-index:999;background:#000;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top);">
+        <div style="position:relative;display:flex;align-items:center;padding:12px 16px;background:rgba(0,0,0,0.92);border-bottom:1px solid rgba(255,255,255,0.08);min-height:48px;">
+          <button style="background:transparent;border:none;color:rgba(255,255,255,0.75);font-size:15px;padding:8px 4px;cursor:pointer;z-index:1;" @click=${cancelCrop}>Cancel</button>
+          <span style="position:absolute;left:50%;transform:translateX(-50%);color:#fff;font-weight:700;font-size:16px;white-space:nowrap;pointer-events:none;">Crop Image</span>
+        </div>
+        <canvas id="crop-canvas" style="flex:1;display:block;width:100%;touch-action:none;cursor:crosshair;"></canvas>
+        <div style="padding:12px 16px;background:rgba(0,0,0,0.92);border-top:1px solid rgba(255,255,255,0.08);">
+          <div style="text-align:center;color:rgba(255,255,255,0.45);font-size:11px;letter-spacing:0.05em;margin-bottom:12px;">
+            DRAG CORNERS TO RESIZE · DRAG INSIDE TO MOVE
+          </div>
+          <button style="width:100%;background:var(--braille-primary);border:none;color:#fff;font-size:16px;font-weight:700;padding:14px;border-radius:12px;cursor:pointer;letter-spacing:0.02em;" @click=${confirmCrop}>Analyse →</button>
+        </div>
+      </div>
+    `}
 
     <!-- Page content -->
     <div class="page-content">
@@ -57,16 +69,16 @@
       </div>
 
       <!-- Sample image shortcut -->
-      <div class="block mt-1">
+      <!-- <div class="block mt-1">
         <button class="btn-sample" @click=${trySampleImage}>
           <i class="icon material-icons">science</i>
           Try "Hello World" Sample
         </button>
-      </div>
+      </div> -->
 
       <!-- Upload result -->
       ${uploadResult && $h`
-        <div class="block anim-slide-up">
+        <div class="card anim-slide-up">
           <div class="detected-text-card">
             <div class="text-xs font-semibold color-primary mb-1">DETECTED TEXT</div>
             <div class="detected-text-content">${uploadResult.text}</div>
@@ -77,6 +89,32 @@
               </span>
               <span class="text-xs" style="color:#757575;">${uploadResult.charCount} chars</span>
             </div>
+
+            <!-- Braille cell dot patterns -->
+            ${uploadResult.cells && uploadResult.cells.filter(c => c.char !== ' ').length > 0 && $h`
+              <div style="margin-top:var(--space-2);padding-top:var(--space-2);border-top:1px solid rgba(0,0,0,0.07);">
+                <div style="font-size:10px;font-weight:600;color:#9e9e9e;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:8px;">
+                  ${uploadResult.cells.filter(c => c.char !== ' ').length} cells detected
+                </div>
+                <div style="overflow-x:auto;-webkit-overflow-scrolling:touch;">
+                  <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                    ${uploadResult.cells.map(cell => cell.char === ' '
+                      ? $h`<div style="width:14px;"></div>`
+                      : $h`
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:4px;padding:6px 7px;background:rgba(0,0,0,0.04);border-radius:8px;border:1px solid rgba(0,0,0,0.08);">
+                          <div style="display:grid;grid-template-columns:repeat(2,10px);grid-template-rows:repeat(3,10px);gap:3px;">
+                            ${getDisplayDots(cell.char).map(raised => $h`
+                              <div style="width:10px;height:10px;border-radius:50%;${raised ? 'background:var(--braille-secondary);' : 'border:1.5px solid #ddd;background:transparent;'}"></div>
+                            `)}
+                          </div>
+                          <div style="font-size:10px;font-weight:700;color:var(--braille-primary);line-height:1;">${cell.char === '?' ? '?' : cell.char.toUpperCase()}</div>
+                        </div>
+                      `
+                    )}
+                  </div>
+                </div>
+              </div>
+            `}
             <div class="card-actions">
               <button class="btn-braille-primary" style="flex:1;" @click=${() => speakText(uploadResult.text)}>
                 <i class="icon material-icons">volume_up</i>
@@ -93,20 +131,18 @@
 
       <!-- Upload error -->
       ${uploadError && $h`
-        <div class="block">
-          <div style="background:rgba(244,67,54,0.08);border:1px solid var(--braille-error);border-radius:var(--radius-md);padding:var(--space-3);">
-            <div class="flex items-center gap-2 color-error font-semibold text-sm">
-              <i class="icon material-icons" style="font-size:18px;">error_outline</i>
-              ${uploadError}
-            </div>
-          </div>
+       <div class="margin-horizontal" style="background:rgba(244,67,54,0.08);border:1px solid var(--braille-error);border-radius:var(--radius-md);padding:var(--space-3);">
+        <div class="flex items-center gap-2 color-error font-semibold text-sm">
+          <i class="icon material-icons" style="font-size:18px;">error_outline</i>
+          ${uploadError}
         </div>
+      </div>
       `}
 
       <!-- Processing indicator -->
       ${isProcessing && $h`
         <div class="block text-center">
-          <div class="preloader color-green"></div>
+         
           <div class="text-sm mt-2" style="color:#757575;">Analysing Braille...</div>
         </div>
       `}
@@ -120,7 +156,7 @@
           </div>
           <div class="feature-text">
             <h4>Template OCR</h4>
-            <p>36 reference photos power accurate Braille character recognition</p>
+            <p>26 reference photos power accurate Braille character recognition</p>
           </div>
         </div>
         <div class="feature-card">
@@ -140,6 +176,33 @@
             <h4>Flashlight + Grayscale</h4>
             <p>Built-in torch and grayscale mode for embossed Braille</p>
           </div>
+        </div>
+      </div>
+
+      <!-- Permission status -->
+      <div class="block">
+        <div class="text-sm font-semibold color-secondary mb-3" style="text-transform:uppercase;letter-spacing:0.08em;">Permissions</div>
+
+        <div class="feature-card" @click=${requestCameraAccess}>
+          <div class="feature-icon" style="background:${cameraPermission === 'granted' ? 'var(--braille-success)' : cameraPermission === 'denied' ? 'var(--braille-error)' : 'var(--braille-warning)' };">
+            <i class="icon material-icons">${cameraPermission === 'granted' ? 'check_circle' : cameraPermission === 'denied' ? 'videocam_off' : 'videocam'}</i>
+          </div>
+          <div class="feature-text">
+            <h4>Camera Access</h4>
+            <p>${cameraPermission === 'granted' ? 'Camera permission granted' : cameraPermission === 'denied' ? 'Camera blocked — tap to open settings' : 'Tap to grant camera permission'}</p>
+          </div>
+          <i class="icon material-icons" style="color:#bbb;font-size:18px;margin-left:auto;">chevron_right</i>
+        </div>
+
+        <div class="feature-card" @click=${requestAudioAccess}>
+          <div class="feature-icon" style="background:${audioPermission === 'granted' ? 'var(--braille-success)' : audioPermission === 'denied' ? 'var(--braille-error)' : 'var(--braille-warning)' };">
+            <i class="icon material-icons">${audioPermission === 'granted' ? 'check_circle' : audioPermission === 'denied' ? 'mic_off' : 'mic'}</i>
+          </div>
+          <div class="feature-text">
+            <h4>Microphone Access</h4>
+            <p>${audioPermission === 'granted' ? 'Microphone permission granted' : audioPermission === 'denied' ? 'Microphone blocked — tap to open settings' : 'Tap to grant microphone permission'}</p>
+          </div>
+          <i class="icon material-icons" style="color:#bbb;font-size:18px;margin-left:auto;">chevron_right</i>
         </div>
       </div>
 
@@ -182,16 +245,325 @@ import {
   matchCellsToTemplates,
   assembleSentence,
 } from '../js/detection/simple-braille-detector.js';
-import { processDetectionResult } from '../js/recognition/pattern-matcher.js';
+import { processDetectionResult, isLikelyGibberishText } from '../js/recognition/pattern-matcher.js';
+import { CHAR_DOT_PATTERNS } from '../js/utils/braille-mappings.js';
 import sampleImageSrc from '../assets/sample.jpeg';
 
-export default (props, { $f7, $store, $update, $on }) => {
+export default (props, { $f7, $store, $update, $on, $onMounted }) => {
   let uploadResult  = null;
   let uploadError   = null;
   let isProcessing  = false;
 
+  // ── Crop state ─────────────────────────────────────────────────────────
+  let cropActive  = false;
+  let cropImgEl   = null;
+  let cropNatW    = 0;
+  let cropNatH    = 0;
+  // Crop rectangle in normalized image-space [0..1]
+  let cropNX = 0.03, cropNY = 0.03, cropNW = 0.94, cropNH = 0.94;
+  // Canvas internals
+  let _cropCanvas = null;
+  let _cropCtx    = null;
+  let _cropFit    = { fitW: 0, fitH: 0, offX: 0, offY: 0 };
+  let _cropDragMode  = null;   // null | 'move' | 'tl' | 'tr' | 'bl' | 'br'
+  let _cropDragStart = null;   // { px, py, nx, ny, nw, nh }
+  const _HANDLE_HIT  = 30;    // px hit-radius for corner handles
+  const _HANDLE_R    = 9;     // visual dot radius
+
+  /**
+   * Returns 6 booleans in 2-column CSS grid order (left-col then right-col per row):
+   * [dot1, dot4,  dot2, dot5,  dot3, dot6]
+   * dot1=left-top  dot4=right-top
+   * dot2=left-mid  dot5=right-mid
+   * dot3=left-bot  dot6=right-bot
+   *
+   * Uses CHAR_DOT_PATTERNS — the canonical Braille dot layout for the OCR-matched
+   * character. Because recognition is done by NCC template photo matching, the
+   * matched character IS the ground truth; we display its standard dot pattern.
+   *
+   * @param {string} char  OCR-matched character (e.g. 'h')
+   */
+  function getDisplayDots(char) {
+    const mask = CHAR_DOT_PATTERNS[char] || 0;
+    const b = (bit) => !!((mask >> bit) & 1);
+    return [b(0), b(3), b(1), b(4), b(2), b(5)];
+  }
+
+  // Permission states: 'unknown' | 'granted' | 'denied' | 'prompt'
+  let cameraPermission = 'unknown';
+  let audioPermission  = 'unknown';
+
   // history is accessed via getter each render so it stays reactive
   function getHistory() { return $store.getters.detectionHistory || []; }
+
+  // ── Permission checking ───────────────────────────────────────────────
+  async function checkPermissions() {
+    cameraPermission = await _queryPermission('camera');
+    audioPermission  = await _queryPermission('microphone');
+    $update();
+  }
+
+  /**
+   * Query a permission status using the Permissions API.
+   * Falls back to 'unknown' if not supported.
+   */
+  async function _queryPermission(name) {
+    try {
+      if (navigator.permissions && navigator.permissions.query) {
+        const result = await navigator.permissions.query({ name });
+        result.onchange = () => {
+          if (name === 'camera')     cameraPermission = result.state;
+          if (name === 'microphone') audioPermission  = result.state;
+          $update();
+        };
+        return result.state; // 'granted' | 'denied' | 'prompt'
+      }
+    } catch { /* Permissions API not supported for this name */ }
+    return 'unknown';
+  }
+
+  /**
+   * Request camera permission via getUserMedia (or Cordova plugin on Android).
+   */
+  async function requestCameraAccess() {
+    if (cameraPermission === 'granted') {
+      $f7.toast.show({ text: 'Camera access already granted', closeTimeout: 2000 });
+      return;
+    }
+    try {
+      // Android Cordova — use plugin
+      if (window.cordova && window.cordova.plugins && window.cordova.plugins.permissions) {
+        const perms = window.cordova.plugins.permissions;
+        const granted = await new Promise((resolve) => {
+          perms.requestPermissions([perms.CAMERA], (s) => resolve(!!s.hasPermission), () => resolve(false));
+        });
+        cameraPermission = granted ? 'granted' : 'denied';
+      } else {
+        // Web / iOS — getUserMedia triggers the browser prompt
+        const testStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        testStream.getTracks().forEach(t => t.stop());
+        cameraPermission = 'granted';
+      }
+    } catch {
+      cameraPermission = 'denied';
+    }
+    $update();
+    if (cameraPermission === 'denied') {
+      $f7.dialog.alert(
+        'Camera access was denied. Please enable it in your device Settings → App Permissions.',
+        'Camera Blocked'
+      );
+    }
+  }
+
+  /**
+   * Request microphone/audio permission via getUserMedia (or Cordova plugin).
+   */
+  async function requestAudioAccess() {
+    if (audioPermission === 'granted') {
+      $f7.toast.show({ text: 'Microphone access already granted', closeTimeout: 2000 });
+      return;
+    }
+    try {
+      if (window.cordova && window.cordova.plugins && window.cordova.plugins.permissions) {
+        const perms = window.cordova.plugins.permissions;
+        const granted = await new Promise((resolve) => {
+          perms.requestPermissions([perms.RECORD_AUDIO], (s) => resolve(!!s.hasPermission), () => resolve(false));
+        });
+        audioPermission = granted ? 'granted' : 'denied';
+      } else {
+        const testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        testStream.getTracks().forEach(t => t.stop());
+        audioPermission = 'granted';
+      }
+    } catch {
+      audioPermission = 'denied';
+    }
+    $update();
+    if (audioPermission === 'denied') {
+      $f7.dialog.alert(
+        'Microphone access was denied. Please enable it in your device Settings → App Permissions.',
+        'Microphone Blocked'
+      );
+    }
+  }
+
+  $onMounted(() => {
+    checkPermissions();
+  });
+
+  // ── Crop functions ───────────────────────────────────────────────────
+
+  function _renderCrop() {
+    if (!_cropCanvas || !cropImgEl) return;
+    const dw = _cropCanvas.clientWidth;
+    const dh = _cropCanvas.clientHeight;
+    // Letterbox image into canvas display area
+    const fitScale = Math.min(dw / cropNatW, dh / cropNatH);
+    const fitW = cropNatW * fitScale;
+    const fitH = cropNatH * fitScale;
+    const offX = (dw - fitW) / 2;
+    const offY = (dh - fitH) / 2;
+    _cropFit = { fitW, fitH, offX, offY };
+    // Sync canvas pixel resolution to DPR
+    const dpr = window.devicePixelRatio || 1;
+    if (_cropCanvas.width !== Math.round(dw * dpr) || _cropCanvas.height !== Math.round(dh * dpr)) {
+      _cropCanvas.width  = Math.round(dw * dpr);
+      _cropCanvas.height = Math.round(dh * dpr);
+      _cropCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    const ctx = _cropCtx;
+    ctx.clearRect(0, 0, dw, dh);
+    // Background + dimmed full image
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, dw, dh);
+    ctx.globalAlpha = 0.4;
+    ctx.drawImage(cropImgEl, offX, offY, fitW, fitH);
+    ctx.globalAlpha = 1.0;
+    // Bright crop region
+    const rx = offX + cropNX * fitW;
+    const ry = offY + cropNY * fitH;
+    const rw = cropNW * fitW;
+    const rh = cropNH * fitH;
+    ctx.drawImage(
+      cropImgEl,
+      cropNX * cropNatW, cropNY * cropNatH, cropNW * cropNatW, cropNH * cropNatH,
+      rx, ry, rw, rh
+    );
+    // Border
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(rx, ry, rw, rh);
+    // Rule-of-thirds grid
+    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    ctx.lineWidth = 1;
+    for (let i = 1; i < 3; i++) {
+      ctx.beginPath(); ctx.moveTo(rx + rw*i/3, ry); ctx.lineTo(rx + rw*i/3, ry+rh); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(rx, ry + rh*i/3); ctx.lineTo(rx+rw, ry + rh*i/3); ctx.stroke();
+    }
+    // Corner handles
+    [[rx,ry],[rx+rw,ry],[rx,ry+rh],[rx+rw,ry+rh]].forEach(([cx,cy]) => {
+      ctx.beginPath();
+      ctx.arc(cx, cy, _HANDLE_R, 0, Math.PI*2);
+      ctx.fillStyle = '#fff';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    });
+  }
+
+  function _initCropCanvas() {
+    _cropCanvas = document.getElementById('crop-canvas');
+    if (!_cropCanvas) return;
+    _cropCtx = _cropCanvas.getContext('2d');
+    _renderCrop();
+    _cropCanvas.addEventListener('pointerdown',   _onCropDown);
+    _cropCanvas.addEventListener('pointermove',   _onCropMove);
+    _cropCanvas.addEventListener('pointerup',     _onCropUp);
+    _cropCanvas.addEventListener('pointercancel', _onCropUp);
+  }
+
+  function _cropCanvasPt(e) {
+    const r = _cropCanvas.getBoundingClientRect();
+    return { px: e.clientX - r.left, py: e.clientY - r.top };
+  }
+
+  function _onCropDown(e) {
+    e.preventDefault();
+    const { px, py } = _cropCanvasPt(e);
+    const { fitW, fitH, offX, offY } = _cropFit;
+    const rx = offX + cropNX * fitW,  ry = offY + cropNY * fitH;
+    const rw = cropNW * fitW,          rh = cropNH * fitH;
+    const base = { px, py, nx: cropNX, ny: cropNY, nw: cropNW, nh: cropNH };
+    const hit = (cx, cy) => Math.hypot(px-cx, py-cy) < _HANDLE_HIT;
+    if      (hit(rx,    ry   )) { _cropDragMode = 'tl'; }
+    else if (hit(rx+rw, ry   )) { _cropDragMode = 'tr'; }
+    else if (hit(rx,    ry+rh)) { _cropDragMode = 'bl'; }
+    else if (hit(rx+rw, ry+rh)) { _cropDragMode = 'br'; }
+    else if (px >= rx && px <= rx+rw && py >= ry && py <= ry+rh) { _cropDragMode = 'move'; }
+    else return;
+    _cropDragStart = base;
+    _cropCanvas.setPointerCapture(e.pointerId);
+  }
+
+  function _onCropMove(e) {
+    if (!_cropDragMode || !_cropDragStart) return;
+    e.preventDefault();
+    const { px, py } = _cropCanvasPt(e);
+    const { fitW, fitH } = _cropFit;
+    const dx = (px - _cropDragStart.px) / fitW;
+    const dy = (py - _cropDragStart.py) / fitH;
+    const { nx, ny, nw, nh } = _cropDragStart;
+    const MIN = 0.05;
+    if (_cropDragMode === 'move') {
+      cropNX = Math.max(0, Math.min(1-nw, nx+dx));
+      cropNY = Math.max(0, Math.min(1-nh, ny+dy));
+    } else if (_cropDragMode === 'br') {
+      cropNW = Math.max(MIN, Math.min(1-nx, nw+dx));
+      cropNH = Math.max(MIN, Math.min(1-ny, nh+dy));
+    } else if (_cropDragMode === 'tr') {
+      cropNW = Math.max(MIN, Math.min(1-nx, nw+dx));
+      const ny2 = Math.max(0, Math.min(ny+nh-MIN, ny+dy));
+      cropNH = ny+nh-ny2; cropNY = ny2;
+    } else if (_cropDragMode === 'bl') {
+      const nx2 = Math.max(0, Math.min(nx+nw-MIN, nx+dx));
+      cropNW = nx+nw-nx2; cropNX = nx2;
+      cropNH = Math.max(MIN, Math.min(1-ny, nh+dy));
+    } else if (_cropDragMode === 'tl') {
+      const nx2 = Math.max(0, Math.min(nx+nw-MIN, nx+dx));
+      const ny2 = Math.max(0, Math.min(ny+nh-MIN, ny+dy));
+      cropNW = nx+nw-nx2; cropNX = nx2;
+      cropNH = ny+nh-ny2; cropNY = ny2;
+    }
+    _renderCrop();
+  }
+
+  function _onCropUp() {
+    _cropDragMode  = null;
+    _cropDragStart = null;
+  }
+
+  function _detachCropCanvas() {
+    if (!_cropCanvas) return;
+    _cropCanvas.removeEventListener('pointerdown',   _onCropDown);
+    _cropCanvas.removeEventListener('pointermove',   _onCropMove);
+    _cropCanvas.removeEventListener('pointerup',     _onCropUp);
+    _cropCanvas.removeEventListener('pointercancel', _onCropUp);
+    _cropCanvas = null;
+  }
+
+  async function confirmCrop() {
+    const sx = Math.round(cropNX * cropNatW);
+    const sy = Math.round(cropNY * cropNatH);
+    const sw = Math.round(cropNW * cropNatW);
+    const sh = Math.round(cropNH * cropNatH);
+    const out = document.createElement('canvas');
+    out.width  = sw;
+    out.height = sh;
+    out.getContext('2d').drawImage(cropImgEl, sx, sy, sw, sh, 0, 0, sw, sh);
+    const dataUrl = out.toDataURL('image/jpeg', 0.95);
+    cropActive = false;
+    cropImgEl  = null;
+    isProcessing = true;
+    _detachCropCanvas();
+    $update();
+    try {
+      await _runPipeline(dataUrl);
+    } catch (err) {
+      console.error('[Home] Crop pipeline error:', err);
+      uploadError  = 'An error occurred while processing the cropped image.';
+      isProcessing = false;
+      $update();
+    }
+  }
+
+  function cancelCrop() {
+    cropActive = false;
+    cropImgEl  = null;
+    _detachCropCanvas();
+    $update();
+  }
 
   function startScanning() {
     $f7.views.main.router.navigate('/camera/');
@@ -224,19 +596,27 @@ export default (props, { $f7, $store, $update, $on }) => {
     if (!file) return;
     e.target.value = '';
 
-    uploadResult  = null;
-    uploadError   = null;
-    isProcessing  = true;
+    uploadResult = null;
+    uploadError  = null;
     $update();
 
     try {
       // Convert to data: URL — blob: URLs are blocked by the app's CSP.
       const url = await _fileToDataUrl(file);
-      await _runPipeline(url);
+      const img  = await _loadUrl(url);
+      // Show crop UI before running the pipeline
+      cropImgEl = img;
+      cropNatW  = img.naturalWidth  || img.width;
+      cropNatH  = img.naturalHeight || img.height;
+      // Default: near-full crop with small margin
+      cropNX = 0.03; cropNY = 0.03; cropNW = 0.94; cropNH = 0.94;
+      cropActive = true;
+      $update();
+      // Init canvas after DOM settles
+      setTimeout(_initCropCanvas, 60);
     } catch (err) {
       console.error('[Home] Upload error:', err);
-      uploadError  = 'An error occurred while processing the image.';
-      isProcessing = false;
+      uploadError  = 'An error occurred while loading the image.';
       $update();
     }
   }
@@ -263,59 +643,189 @@ export default (props, { $f7, $store, $update, $on }) => {
     canvas.height = canvasH;
     canvas.getContext('2d').drawImage(img, 0, 0, canvasW, canvasH);
 
-    const roiData = extractCenterROI(canvas, 1.0, 1.0);
-    const quality = assessImageQuality(roiData);
-    console.log(`[Pipeline] Quality: score=${quality.score} embossed=${quality.embossed} acceptable=${quality.isAcceptable}`);
+    const roiCandidates = [
+      { w: 0.95, h: 0.85, label: 'wide' },
+      { w: 0.88, h: 0.72, label: 'medium' },
+      { w: 0.80, h: 0.60, label: 'tight' },
+    ];
 
-    if (!quality.isAcceptable && !quality.embossed) {
-      uploadError  = `Image quality too low: ${quality.summary}. ${quality.advice}.`;
+    let best = null;
+    for (const roi of roiCandidates) {
+      const roiData = extractCenterROI(canvas, roi.w, roi.h);
+      const quality = assessImageQuality(roiData);
+      console.log(`[Pipeline:${roi.label}] Quality: score=${quality.score} embossed=${quality.embossed} acceptable=${quality.isAcceptable}`);
+
+      if (!quality.isAcceptable && !quality.embossed) continue;
+
+      const { dots } = detectBrailleDots(roiData);
+      console.log(`[Pipeline:${roi.label}] Dots detected: ${dots.length}`);
+      if (dots.length === 0 || dots.length > 200) continue;
+
+      const { cellRegions } = segmentCellRegions(roiData, dots);
+      const realCells = cellRegions.filter(c => !c.isSpace);
+      console.log(`[Pipeline:${roi.label}] Cells segmented: ${realCells.length} real + ${cellRegions.length - realCells.length} spaces`);
+      if (cellRegions.length === 0 || realCells.length > 60) continue;
+
+      const matchedCells = matchCellsToTemplates(roiData, cellRegions);
+      const sentence     = assembleSentence(matchedCells);
+      const processed    = processDetectionResult(matchedCells, 0.38);
+      const text         = processed?.text || sentence.text;
+      const confidence   = processed?.confidence ?? sentence.confidence;
+      const gibberish    = !text || confidence < 0.30 || isLikelyGibberishText(text, matchedCells);
+
+      console.log(`[Pipeline:${roi.label}] Result: '${text}' (confidence=${confidence}, gibberish=${gibberish})`);
+
+      const candidate = { roi: roi.label, text, confidence, gibberish, realCells, processed, matchedCells };
+      if (!best) {
+        best = candidate;
+      } else {
+        const bestScore = (best.gibberish ? 0 : 1000) + best.confidence * 100 - best.realCells.length;
+        const candScore = (candidate.gibberish ? 0 : 1000) + candidate.confidence * 100 - candidate.realCells.length;
+        if (candScore > bestScore) best = candidate;
+      }
+    }
+
+    // ── Brightness-boost retry for embossed Braille ──────────────────────
+    // If no result yet, try again on a brightness+contrast-boosted copy of the
+    // canvas.  This recovers cases where the camera's auto-exposure produces a
+    // dark or flat image: the boost makes the raised-dot shadows visible enough
+    // for the adaptive threshold and unsharp-mask preprocessing to fire.
+    if (!best || best.gibberish) {
+      const boostedCanvas = document.createElement('canvas');
+      boostedCanvas.width  = canvasW;
+      boostedCanvas.height = canvasH;
+      const bCtx = boostedCanvas.getContext('2d');
+      // Raking-light embossed dots benefit most from contrast amplification;
+      // brightness(1.35) lifts shadow detail without blowing out highlights.
+      bCtx.filter = 'brightness(1.35) contrast(1.5)';
+      bCtx.drawImage(canvas, 0, 0, canvasW, canvasH);
+      bCtx.filter = 'none';
+
+      for (const roi of roiCandidates) {
+        const roiData = extractCenterROI(boostedCanvas, roi.w, roi.h);
+        const quality = assessImageQuality(roiData);
+        if (!quality.isAcceptable && !quality.embossed) continue;
+
+        const { dots } = detectBrailleDots(roiData);
+        if (dots.length === 0 || dots.length > 200) continue;
+
+        const { cellRegions } = segmentCellRegions(roiData, dots);
+        const realCells = cellRegions.filter(c => !c.isSpace);
+        if (cellRegions.length === 0 || realCells.length > 60) continue;
+
+        const matchedCells = matchCellsToTemplates(roiData, cellRegions);
+        const sentence     = assembleSentence(matchedCells);
+        const processed    = processDetectionResult(matchedCells, 0.38);
+        const text         = processed?.text || sentence.text;
+        const confidence   = processed?.confidence ?? sentence.confidence;
+        const gibberish    = !text || confidence < 0.30 || isLikelyGibberishText(text, matchedCells);
+        console.log(`[Pipeline:boost-${roi.label}] Result: '${text}' conf=${confidence} gibberish=${gibberish}`);
+
+        const candidate = { roi: `boost-${roi.label}`, text, confidence, gibberish, realCells, processed, matchedCells };
+        if (!best) {
+          best = candidate;
+        } else {
+          const bestScore = (best.gibberish ? 0 : 1000) + best.confidence * 100 - best.realCells.length;
+          const candScore = (candidate.gibberish ? 0 : 1000) + candidate.confidence * 100 - candidate.realCells.length;
+          if (candScore > bestScore) best = candidate;
+        }
+        if (best && !best.gibberish) break;
+      }
+    }
+
+    if (!best || best.gibberish || !best.text) {
+      uploadError  = 'Could not recognise Braille characters. Ensure good lighting, center one or two Braille lines, and keep the image sharp.';
       isProcessing = false;
       $update();
       return;
     }
 
-    const { dots } = detectBrailleDots(roiData);
-    console.log(`[Pipeline] Dots detected: ${dots.length}`);
+    console.log(`[Pipeline] Selected ROI=${best.roi}, text='${best.text}', confidence=${best.confidence}`);
 
-    if (dots.length === 0) {
-      uploadError  = 'No Braille dots detected. Ensure the photo shows clear Braille text.';
-      isProcessing = false;
-      $update();
-      return;
-    }
-
-    const { cellRegions } = segmentCellRegions(roiData, dots);
-    const realCells = cellRegions.filter(c => !c.isSpace);
-    console.log(`[Pipeline] Cells segmented: ${realCells.length} real + ${cellRegions.length - realCells.length} spaces`);
-
-    if (cellRegions.length === 0) {
-      uploadError  = 'Could not segment Braille cells. Try a clearer photo.';
-      isProcessing = false;
-      $update();
-      return;
-    }
-
-    const matchedCells = matchCellsToTemplates(roiData, cellRegions);
-    const sentence     = assembleSentence(matchedCells);
-    console.log(`[Pipeline] Result: '${sentence.text}' (confidence=${sentence.confidence})`);
-
-    if (!sentence.text || sentence.confidence < 0.25) {
-      uploadError  = `Could not recognise Braille characters. ${realCells.length} cells found but no readable text. Ensure good lighting and focus.`;
-      isProcessing = false;
-      $update();
-      return;
-    }
-
-    uploadResult = sentence;
-    $store.dispatch('addToHistory', { text: sentence.text, confidence: sentence.confidence, braille: '' });
+    uploadResult = {
+      text: best.text,
+      confidence: best.confidence,
+      charCount: best.text.replace(/\s+/g, '').length,
+      cells: best.matchedCells || [],
+    };
+    $store.dispatch('addToHistory', {
+      text: best.text,
+      confidence: best.confidence,
+      braille: best.processed?.braille || '',
+    });
     isProcessing = false;
     $update();
   }
 
+  // Retained reference prevents GC on Android before speech starts
+  let _ttsUtterance    = null;
+  let _ttsResumeTimer  = null;
+
+  /**
+   * Speak text using the Web Speech API.
+   * Includes Android WebView workarounds:
+   *  - Retain utterance reference to prevent GC
+   *  - Wait for voices via onvoiceschanged if not yet loaded
+   *  - Periodic resume() to prevent Android WebView 14 s pause bug
+   *  - Small settle delay after cancel() before speak()
+   */
   function speakText(text) {
-    if (!('speechSynthesis' in window)) return;
+    if (!text) return;
+    if (!('speechSynthesis' in window)) {
+      $f7.toast.show({ text: 'Text-to-speech not supported on this device', closeTimeout: 2500 });
+      return;
+    }
+    if (!($store.getters.settings?.textToSpeechEnabled ?? true)) return;
+
+    // Clear any running resume-interval
+    if (_ttsResumeTimer) { clearInterval(_ttsResumeTimer); _ttsResumeTimer = null; }
     window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+
+    const _doSpeak = () => {
+      _ttsUtterance = new SpeechSynthesisUtterance(text);
+      _ttsUtterance.rate   = 0.9;
+      _ttsUtterance.pitch  = 1.0;
+      _ttsUtterance.volume = 1.0;
+      // Prefer a local English voice to avoid a network requirement
+      const voices = window.speechSynthesis.getVoices();
+      if (voices.length > 0) {
+        const local = voices.find(v => v.localService && v.lang.startsWith('en'))
+                   || voices.find(v => v.lang.startsWith('en'))
+                   || voices[0];
+        if (local) _ttsUtterance.voice = local;
+      }
+      _ttsUtterance.onend = _ttsUtterance.onerror = () => {
+        if (_ttsResumeTimer) { clearInterval(_ttsResumeTimer); _ttsResumeTimer = null; }
+        _ttsUtterance = null;
+      };
+      // Android WebView pauses synthesis after ~14 s — keep it alive
+      _ttsResumeTimer = setInterval(() => {
+        if (window.speechSynthesis.speaking && window.speechSynthesis.paused) {
+          window.speechSynthesis.resume();
+        } else if (!window.speechSynthesis.speaking) {
+          clearInterval(_ttsResumeTimer); _ttsResumeTimer = null;
+        }
+      }, 5000);
+      window.speechSynthesis.speak(_ttsUtterance);
+    };
+
+    // Settle delay after cancel() — required on some Android versions
+    setTimeout(() => {
+      const voices = window.speechSynthesis.getVoices();
+      if (voices.length > 0) {
+        _doSpeak();
+      } else {
+        // Voices not loaded yet — wait for the event (with a fallback)
+        const _onVoices = () => {
+          window.speechSynthesis.onvoiceschanged = null;
+          _doSpeak();
+        };
+        window.speechSynthesis.onvoiceschanged = _onVoices;
+        setTimeout(() => {
+          if (!_ttsUtterance) { window.speechSynthesis.onvoiceschanged = null; _doSpeak(); }
+        }, 800);
+      }
+    }, 150);
   }
 
   function copyText(text) {

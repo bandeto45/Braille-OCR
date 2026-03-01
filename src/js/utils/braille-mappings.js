@@ -1,6 +1,6 @@
 /**
  * Braille Mappings — Grade 1 (Uncontracted) Braille
- * 36 template characters: a-z (letters) + 0-9 (digits)
+ * 26 template characters: a-z (letters only)
  *
  * Unicode Braille Patterns: U+2800–U+28FF
  * Standard Braille dot numbering (2×3 grid):
@@ -56,12 +56,11 @@ export const textToBraille = Object.fromEntries(
   Object.entries(grade1Mapping).map(([k, v]) => [v, k])
 );
 
-// ─── 36 Template Characters ──────────────────────────────────────────────────
+// ─── 26 Template Characters (letters a–z only) ───────────────────────────────
 export const TEMPLATE_CHARS = [
   'a','b','c','d','e','f','g','h','i','j',
   'k','l','m','n','o','p','q','r','s','t',
   'u','v','w','x','y','z',
-  '0','1','2','3','4','5','6','7','8','9',
 ];
 
 // ─── Explicit dot patterns for each template character ───────────────────────
@@ -75,9 +74,6 @@ export const CHAR_DOT_PATTERNS = {
   p: 0b001111, q: 0b011111, r: 0b010111, s: 0b001110, t: 0b011110,
   u: 0b100101, v: 0b100111, w: 0b111010, x: 0b101101, y: 0b111101,
   z: 0b110101,
-  // Grade 1 digits — same dot patterns as a–j (context: follow number sign)
-  '1': 0b000001, '2': 0b000011, '3': 0b001001, '4': 0b011001, '5': 0b010001,
-  '6': 0b001011, '7': 0b011011, '8': 0b010011, '9': 0b001010, '0': 0b011010,
 };
 
 /**
@@ -92,7 +88,6 @@ export const DOT_PATTERN_TO_CHAR = (() => {
     'a','b','c','d','e','f','g','h','i','j',
     'k','l','m','n','o','p','q','r','s','t',
     'u','v','w','x','y','z',
-    '0','1','2','3','4','5','6','7','8','9',
   ];
   for (const ch of order) {
     const pat = CHAR_DOT_PATTERNS[ch];

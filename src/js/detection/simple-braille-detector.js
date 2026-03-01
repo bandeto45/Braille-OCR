@@ -2,7 +2,7 @@
  * Simple Braille Detector — Canvas API + Template-Photo OCR
  *
  * PRIMARY detector for the Braille OCR app.
- * Loads 36 reference template photos (a–z, 0–9) and uses Normalised
+ * Loads 26 reference template photos (a–z) and uses Normalised
  * Cross-Correlation (NCC) to identify each detected Braille cell.
  * All matched characters across every row are assembled into a full sentence.
  *
@@ -24,8 +24,77 @@ import {
 import { preprocessForBraille } from '../processing/image-enhance.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const MIN_TEMPLATE_CONFIDENCE = 0.40;
+const MIN_TEMPLATE_CONFIDENCE = 0.42;  // NCC confidence threshold
+const MIN_NCC_MARGIN          = 0.02;  // best NCC must beat 2nd-best by this margin
 const WORD_GAP_RATIO          = 1.8;  // gap > ratio × estCellW → word space
+
+// ─── Otsu binarizer ──────────────────────────────────────────────────────────
+/**
+ * Convert a grayscale ImageData to a pure binary ImageData using Otsu's
+ * global threshold.  This is the normalisation step that makes NCC work
+ * like face-recognition similarity matching:
+ *
+ *   Both the reference template AND the extracted camera cell are converted
+ *   to the SAME binary representation (0 = dot blob, 255 = background) before
+ *   any comparison is made.  After binarization NCC measures purely whether
+ *   the DOT POSITIONS agree — it is invariant to:
+ *     • lighting (bright sun / dim room)
+ *     • embossing strength (deep raised dots vs barely-raised)
+ *     • ink density (heavy print vs faded)
+ *     • camera exposure / colour temperature
+ *
+ * Inversion guard: if >60 % of pixels are dark the image is flipped so the
+ * convention is always  dark dot blobs on white background  — matching the
+ * template style produced by generate-templates.py.
+ *
+ * @param {ImageData} gs  Grayscale source (R = G = B = luma, A = 255)
+ * @returns {ImageData}   Binary ImageData (0 = dot, 255 = background)
+ */
+function _otsuBinarize(gs) {
+  const src = gs.data;
+  const n   = gs.width * gs.height;
+
+  // Build 256-bin histogram (R channel == luma for grayscale)
+  const hist = new Int32Array(256);
+  for (let i = 0; i < src.length; i += 4) hist[src[i]]++;
+
+  // Otsu's between-class variance maximisation
+  let total = 0;
+  for (let t = 0; t < 256; t++) total += t * hist[t];
+
+  let sumB = 0, wB = 0, maxVar = 0, threshold = 128;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    const wF = n - wB;
+    if (wF === 0) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (total - sumB) / wF;
+    const v  = wB * wF * (mB - mF) ** 2;
+    if (v > maxVar) { maxVar = v; threshold = t; }
+  }
+
+  // Apply threshold and count dark pixels
+  const out = new Uint8ClampedArray(src.length);
+  let dark = 0;
+  for (let i = 0; i < src.length; i += 4) {
+    const v = src[i] <= threshold ? 0 : 255;
+    out[i] = out[i + 1] = out[i + 2] = v;
+    out[i + 3] = 255;
+    if (v === 0) dark++;
+  }
+
+  // Inversion guard — flip if image is mostly dark (white dots on dark bg)
+  if (dark / n > 0.60) {
+    for (let i = 0; i < out.length; i += 4) {
+      const v = out[i] === 0 ? 255 : 0;
+      out[i] = out[i + 1] = out[i + 2] = v;
+    }
+  }
+
+  return new ImageData(out, gs.width, gs.height);
+}
 
 // ─── Template store ───────────────────────────────────────────────────────────
 /** @type {Object<string, ImageData>} */
@@ -38,6 +107,12 @@ let detectorInitialized = false;
  */
 export let templatesAreSynthetic = false;
 
+/**
+ * Number of template characters that fell back to synthetic dot-pattern images
+ * because no real photo was found.  0 = all 26 letter photos loaded from real files.
+ */
+export let templatesMissingCount = 0;
+
 // Vite glob import — resolved URLs for all 36 template photos (.jpg or .png).
 // Handles both uppercase (A.jpg) and lowercase (a.png) filenames.
 // Returns an empty object when no image files exist in the folder.
@@ -47,7 +122,7 @@ const TEMPLATE_URLS = import.meta.glob(
     '../../assets/braille-templates/*.jpeg',
     '../../assets/braille-templates/*.png',
   ],
-  { eager: false, query: '?url', import: 'default' }
+  { eager: true, query: '?url', import: 'default' }
 );
 
 // ─── Synthetic template generator ────────────────────────────────────────────
@@ -147,27 +222,33 @@ export async function initializeDetector() {
       try {
         const key    = candidates.find(k => TEMPLATE_URLS[k]);
         if (!key) throw new Error('no-glob-entry');
-        const loader = TEMPLATE_URLS[key];
-        const url    = await loader();
+        const url    = TEMPLATE_URLS[key];
         const img    = await loadImage(typeof url === 'object' ? url.default : url);
-        resolved[ch] = renderToGrayscaleImageData(img, TEMPLATE_W, TEMPLATE_H);
+        // Binarize: normalise to the same binary domain (black dots / white bg)
+        // that each camera-extracted cell is converted to before NCC.
+        // This makes the comparison purely structural — invariant to the
+        // original photo brightness, paper colour, or embossing depth.
+        resolved[ch] = _otsuBinarize(renderToGrayscaleImageData(img, TEMPLATE_W, TEMPLATE_H));
         photoCount++;
       } catch {
-        // No real photo → render dot-pattern synthetic template
-        resolved[ch] = generateSyntheticTemplate(ch);
+        // No real photo → render dot-pattern synthetic template then binarize.
+        resolved[ch] = _otsuBinarize(generateSyntheticTemplate(ch));
       }
     })
   );
 
-  // Flag whether we fell back to synthetic templates
-  templatesAreSynthetic = photoCount < TEMPLATE_CHARS.length;
+  // Flag whether ALL templates fell back to synthetic (zero real photos found).
+  // When some photos are missing the synthetic fallback fills in for those chars,
+  // but NCC matching still uses the real photos that are present.
+  templatesMissingCount = TEMPLATE_CHARS.length - photoCount;
+  templatesAreSynthetic = photoCount === 0;
 
-  if (templatesAreSynthetic) {
+  if (photoCount < TEMPLATE_CHARS.length) {
     const missing = TEMPLATE_CHARS.length - photoCount;
     console.info(
-      `[BrailleDetector] ${photoCount}/36 real template photos loaded; ` +
-      `${missing} synthetic dot-pattern template(s) generated. ` +
-      'Add JPG or PNG photos to src/assets/braille-templates/ for better accuracy.'
+      `[BrailleDetector] ${photoCount}/${TEMPLATE_CHARS.length} real letter template photos loaded; ` +
+      `${missing} synthetic dot-pattern template(s) generated as fallback. ` +
+      'Add missing PNG photos to src/assets/braille-templates/ for better accuracy.'
     );
   }
 
@@ -285,12 +366,14 @@ export function detectBrailleDots(imageData) {
   const blockSize = Math.max(11, Math.round(Math.min(w, h) / 20) | 1);
   const integral  = _buildIntegralImage(data, w, h);
 
-  const binary = new Uint8Array(w * h);
+  let binary = new Uint8Array(w * h);
   // C is the threshold bias: pixel < (localMean - C) → dot candidate.
-  // Positive C = selective (only pixels well below local average are dots).
-  // Embossed Braille has subtle shadows — after histogram normalization
-  // C=5 reliably separates dot shadows without marking flat background.
-  const C = 5; // same value for both modes after preprocessing normalises contrast
+  // After the embossed preprocessing path (percentile-stretch + unsharp mask),
+  // local contrast is already amplified so a tighter C=2 avoids marking paper
+  // texture while still firing on real dot-shadow gradients.
+  // For non-embossed (printed) Braille the existing C=5 remains appropriate.
+  const C = embossed ? 2 : 5;
+
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const half = Math.floor(blockSize / 2);
@@ -305,6 +388,8 @@ export function detectBrailleDots(imageData) {
       binary[y * w + x] = pixel < (localMean - C) ? 0 : 1;
     }
   }
+
+  binary = _morphCloseBinary(binary, w, h, 2);
 
   // ── Connected-component labelling (simple flood fill) ──
   const dots = [];
@@ -337,6 +422,67 @@ export function detectBrailleDots(imageData) {
             });
           }
         }
+      }
+    }
+  }
+
+  if (dots.length > 2) {
+    const radii = dots.map(d => d.radius).sort((a, b) => a - b);
+    const medR  = radii[Math.floor(radii.length / 2)] || 1;
+    const strict = dots.length > 20;
+    const minRKeep = medR * (strict ? 0.62 : 0.45);
+    const maxRKeep = medR * (strict ? 1.8 : 2.5);
+    const keep  = dots.filter(d => (
+      d.radius >= minRKeep
+      && d.radius <= maxRKeep
+      && (!strict || d.confidence >= 0.45)
+    ));
+    if (keep.length >= 2) {
+      dots.length = 0;
+      dots.push(...keep);
+    }
+  }
+
+  if (dots.length > 20) {
+    const binSize = Math.max(12, Math.round(h / 40));
+    const binCount = Math.ceil(h / binSize);
+    const bins = new Array(binCount).fill(0);
+    for (const d of dots) {
+      const b = Math.max(0, Math.min(binCount - 1, Math.floor(d.y / binSize)));
+      bins[b]++;
+    }
+
+    const peak = Math.max(...bins);
+    const minActive = Math.max(3, Math.floor(peak * 0.35));
+    const active = [];
+    for (let i = 0; i < binCount; i++) {
+      if (bins[i] >= minActive) active.push(i);
+    }
+
+    if (active.length > 0) {
+      const bands = [];
+      let start = active[0], prev = active[0];
+      for (let i = 1; i < active.length; i++) {
+        const b = active[i];
+        if (b <= prev + 1) prev = b;
+        else {
+          bands.push([start, prev]);
+          start = b;
+          prev = b;
+        }
+      }
+      bands.push([start, prev]);
+
+      const yMargin = Math.max(10, Math.round(Math.sqrt(imgArea) * 0.01));
+      const keep = dots.filter((d) => bands.some(([b0, b1]) => {
+        const y0 = b0 * binSize - yMargin;
+        const y1 = (b1 + 1) * binSize + yMargin;
+        return d.y >= y0 && d.y <= y1;
+      }));
+
+      if (keep.length >= 3) {
+        dots.length = 0;
+        dots.push(...keep);
       }
     }
   }
@@ -508,52 +654,70 @@ export function matchCellsByDotPattern(cellRegions) {
       return { char: '?', confidence: 0, rowIndex: cell.rowIndex, colIndex: cell.colIndex, isSpace: false, dotPattern: 0 };
     }
 
-    // ── Cluster dots by Y → row 0 (top), 1 (mid), 2 (bot) ──────────────────
-    // Threshold: slightly less than the expected inter-dot-row spacing so that
-    // the 3 layers (top/mid/bot) within one Braille cell form distinct clusters
-    // even when the image is slightly warped.  estCellH ≈ medY×2.6, so
-    // inter-dot-row spacing ≈ estCellH/2.6 ≈ 0.38×estCellH; we use 0.30× as
-    // a safe threshold that is less than one inter-dot-row gap.
-    const Y_THRESH = (cell.h > 0 ? cell.h * 0.30 : 25);
-    const yClusters = [];
-    for (const d of dedupedDots.slice().sort((a, b) => a.y - b.y)) {
-      let placed = false;
-      for (const cl of yClusters) {
-        if (Math.abs(d.y - cl.meanY) < Y_THRESH) {
-          cl.pts.push(d);
-          cl.meanY = cl.pts.reduce((s, p) => s + p.y, 0) / cl.pts.length;
-          placed = true; break;
-        }
-      }
-      if (!placed) yClusters.push({ meanY: d.y, pts: [d] });
+    const sortedByX = [...dedupedDots].sort((a, b) => a.x - b.x);
+    let bestGap = 0, gapIdx = -1;
+    for (let i = 1; i < sortedByX.length; i++) {
+      const gap = sortedByX[i].x - sortedByX[i - 1].x;
+      if (gap > bestGap) { bestGap = gap; gapIdx = i; }
     }
-    yClusters.sort((a, b) => a.meanY - b.meanY);
-    const rowClusters = yClusters.slice(0, 3); // standard Braille has max 3 dot rows
+    const minColGap = medRadius * 2.4;
+    let leftDots, rightDots;
+    if (bestGap > minColGap && gapIdx > 0) {
+      leftDots  = sortedByX.slice(0, gapIdx);
+      rightDots = sortedByX.slice(gapIdx);
+    } else {
+      leftDots  = sortedByX;
+      rightDots = [];
+    }
 
-    // ── Horizontal midpoint for left / right column split ────────────────────
-    const cellMidX = cell.x + cell.w / 2;
-
-    // ── Build 6-bit pattern ──────────────────────────────────────────────────
-    let pattern = 0;
-    rowClusters.forEach((cluster, rowIdx) => {
-      for (const pt of cluster.pts) {
-        const bitIdx = pt.x > cellMidX ? rowIdx + 3 : rowIdx;
-        pattern |= (1 << bitIdx);
+    const Y_THRESH = (cell.h > 0 ? cell.h * 0.30 : 25);
+    function _yClusterAndAssign(colDots, colOffset) {
+      if (colDots.length === 0) return;
+      const ySorted = [...colDots].sort((a, b) => a.y - b.y);
+      const yGroups = [];
+      for (const d of ySorted) {
+        let placed = false;
+        for (const g of yGroups) {
+          if (Math.abs(d.y - g.meanY) < Y_THRESH) {
+            g.pts.push(d);
+            g.meanY = g.pts.reduce((s, p) => s + p.y, 0) / g.pts.length;
+            placed = true; break;
+          }
+        }
+        if (!placed) yGroups.push({ meanY: d.y, pts: [d] });
       }
-    });
+      yGroups.sort((a, b) => a.meanY - b.meanY);
+      yGroups.slice(0, 3).forEach((g, rowIdx) => {
+        pattern |= (1 << (colOffset + rowIdx));
+      });
+    }
+
+    let pattern = 0;
+    _yClusterAndAssign(leftDots, 0);
+    _yClusterAndAssign(rightDots, 3);
 
     // ── Lookup character via DOT_PATTERN_TO_CHAR Map (letters-first order) ──
     const bestChar = DOT_PATTERN_TO_CHAR.get(pattern) ?? '?';
 
     console.log(
       `[DotPattern] r${cell.rowIndex}c${cell.colIndex}: ${dedupedDots.length} dots,`,
-      `Y-rows=${rowClusters.length}, midX=${cellMidX.toFixed(0)},`,
+      `L=${leftDots.length} R=${rightDots.length}, gap=${bestGap.toFixed(1)},`,
       `pattern=${pattern.toString(2).padStart(6,'0')} → '${bestChar}'`
     );
 
+    const dotCount = dedupedDots.length;
+    const countConfidence =
+      dotCount <= 1 ? 0.35 :
+      dotCount === 2 ? 0.52 :
+      dotCount === 3 ? 0.68 : 0.78;
+    const colQuality = rightDots.length > 0 || dotCount <= 3 ? 1 : 0.65;
+    const patternConfidence = bestChar !== '?'
+      ? Math.min(0.9, countConfidence * colQuality)
+      : 0.08;
+
     return {
       char:       bestChar,
-      confidence: bestChar !== '?' ? 0.9 : 0.1,
+      confidence: patternConfidence,
       rowIndex:   cell.rowIndex,
       colIndex:   cell.colIndex,
       isSpace:    false,
@@ -563,23 +727,109 @@ export function matchCellsByDotPattern(cellRegions) {
 }
 
 /**
- * Recognise each cell using dot-pattern matching only.
- * NCC template comparison is not used — dot-pattern recognition is
- * lighting/scale-independent and definitively correct for Grade 1 Braille.
+/**
+ * Recognise each cell by binary NCC template photo matching.
  *
- * @param {ImageData} roiData      Full ROI ImageData (kept for API compat)
- * @param {Array}     cellRegions  Must include .dots[] per cell
- * @returns {Array<{char, confidence, rowIndex, colIndex, isSpace}>}
+ * This is a facial-recognition-style comparison pipeline:
+ *   1. Extract the cell's pixel region from the ROI
+ *   2. Resize to canonical 64×96 px
+ *   3. Convert to grayscale
+ *   4. Apply Otsu binarization → black dot blobs on white background
+ *   5. Compute NCC against all 26 binarized reference templates
+ *   6. Accept best match if confidence ≥ MIN_TEMPLATE_CONFIDENCE AND
+ *      the margin over 2nd-best ≥ MIN_NCC_MARGIN (unambiguous identification)
+ *
+ * Both the templates (binarized at load-time) and the query cell (binarized
+ * here) are in the same pure binary domain, so NCC measures purely whether
+ * dot POSITIONS agree — invariant to lighting, embossing strength, and focus.
  */
 export function matchCellsToTemplates(roiData, cellRegions) {
   if (!cellRegions || cellRegions.length === 0) return [];
 
-  const results  = matchCellsByDotPattern(cellRegions);
+  const hasTemplates = Object.keys(templateImageData).length > 0;
+
+  const results = cellRegions.map((cell) => {
+    // Space markers are identified by gap analysis — no NCC needed
+    if (cell.isSpace) {
+      return { char: ' ', confidence: 1, rowIndex: cell.rowIndex, colIndex: cell.colIndex, isSpace: true };
+    }
+
+    if (!hasTemplates) {
+      return { char: '?', confidence: 0, rowIndex: cell.rowIndex, colIndex: cell.colIndex, isSpace: false };
+    }
+
+    // ── 1-4. Extract → resize → grayscale → binarize ─────────────────────
+    const cellImg = _extractCellImageData(roiData, cell);
+    if (!cellImg) {
+      return { char: '?', confidence: 0, rowIndex: cell.rowIndex, colIndex: cell.colIndex, isSpace: false };
+    }
+    const resized   = resizeImageData(cellImg, TEMPLATE_W, TEMPLATE_H);
+    const binarized = _otsuBinarize(resized);  // same domain as all templates
+
+    // ── 5. NCC vs every template ──────────────────────────────────────────
+    let bestChar  = '?';
+    let bestNCC   = -Infinity;
+    let secondNCC = -Infinity;
+
+    for (const [ch, tmplData] of Object.entries(templateImageData)) {
+      const ncc = computeNCC(binarized.data, tmplData.data);
+      if (ncc > bestNCC) {
+        secondNCC = bestNCC;
+        bestNCC   = ncc;
+        bestChar  = ch;
+      } else if (ncc > secondNCC) {
+        secondNCC = ncc;
+      }
+    }
+
+    // ── 6. Accept / reject — with dot-pattern fallback ───────────────────
+    // Map NCC [-1, 1] → confidence [0, 1]
+    const confidence = (bestNCC + 1) / 2;
+    const margin     = bestNCC - secondNCC;
+    const accepted   = confidence >= MIN_TEMPLATE_CONFIDENCE && margin >= MIN_NCC_MARGIN;
+
+    if (accepted) {
+      return {
+        char:      bestChar,
+        confidence,
+        rowIndex:  cell.rowIndex,
+        colIndex:  cell.colIndex,
+        isSpace:   false,
+        nccMargin: margin,
+      };
+    }
+
+    // NCC uncertain — fall back to lighting-invariant dot-position matching.
+    // matchCellsByDotPattern() uses the dot coordinates already stored on the
+    // cell region (populated by segmentCellRegions) so no re-detection needed.
+    const dpResult = matchCellsByDotPattern([cell])[0];
+    if (dpResult && dpResult.char !== '?' && dpResult.confidence >= 0.35) {
+      return {
+        char:      dpResult.char,
+        confidence: Math.min(dpResult.confidence, MIN_TEMPLATE_CONFIDENCE - 0.01),
+        rowIndex:  cell.rowIndex,
+        colIndex:  cell.colIndex,
+        isSpace:   false,
+        nccMargin: margin,
+        fromDotPattern: true,
+      };
+    }
+
+    return {
+      char:      '?',
+      confidence: confidence * 0.5,
+      rowIndex:  cell.rowIndex,
+      colIndex:  cell.colIndex,
+      isSpace:   false,
+      nccMargin: margin,
+    };
+  });
+
   const nonSpace = results.filter(c => !c.isSpace);
   const matched  = nonSpace.filter(c => c.char !== '?');
   console.log(
-    `[Detector] Dot-pattern: ${matched.length}/${nonSpace.length} cells recognised`,
-    '→', results.filter(c => !c.isSpace).map(c => c.char).join('')
+    `[Detector] Binary-NCC matched: ${matched.length}/${nonSpace.length}`,
+    '→', nonSpace.map(c => c.char).join('')
   );
   return results;
 }
@@ -711,6 +961,76 @@ function _floodFill(binary, visited, w, h, startX, startY) {
   return { size, cx, cy, minX, maxX, minY, maxY };
 }
 
+function _morphCloseBinary(binary, w, h, r) {
+  const dilated = new Uint8Array(w * h);
+  dilated.fill(1);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (binary[y * w + x] === 0) {
+        const ylo = Math.max(0, y - r), yhi = Math.min(h - 1, y + r);
+        const xlo = Math.max(0, x - r), xhi = Math.min(w - 1, x + r);
+        for (let ny = ylo; ny <= yhi; ny++) {
+          for (let nx = xlo; nx <= xhi; nx++) dilated[ny * w + nx] = 0;
+        }
+      }
+    }
+  }
+
+  const result = new Uint8Array(w * h);
+  result.fill(0);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (dilated[y * w + x] === 1) {
+        const ylo = Math.max(0, y - r), yhi = Math.min(h - 1, y + r);
+        const xlo = Math.max(0, x - r), xhi = Math.min(w - 1, x + r);
+        for (let ny = ylo; ny <= yhi; ny++) {
+          for (let nx = xlo; nx <= xhi; nx++) result[ny * w + nx] = 1;
+        }
+      }
+    }
+  }
+  return result;
+}
+
+function _extractCellImageData(roiData, cell) {
+  const dots = cell.dots || [];
+  let cx, cy;
+  if (dots.length > 0) {
+    cx = dots.reduce((s, d) => s + d.x, 0) / dots.length;
+    cy = dots.reduce((s, d) => s + d.y, 0) / dots.length;
+  } else {
+    cx = cell.x + cell.w / 2;
+    cy = cell.y + cell.h / 2;
+  }
+
+  const cw = Math.round(cell.w * 1.3);
+  const ch = Math.round(cell.h * 1.3);
+  const x0 = Math.max(0, Math.round(cx - cw / 2));
+  const y0 = Math.max(0, Math.round(cy - ch / 2));
+  const x1 = Math.min(roiData.width, x0 + cw);
+  const y1 = Math.min(roiData.height, y0 + ch);
+  const aw = x1 - x0;
+  const ah = y1 - y0;
+
+  if (aw < 4 || ah < 4) return null;
+
+  const pixelData = new Uint8ClampedArray(aw * ah * 4);
+  for (let dy = 0; dy < ah; dy++) {
+    for (let dx = 0; dx < aw; dx++) {
+      const srcIdx = ((y0 + dy) * roiData.width + (x0 + dx)) * 4;
+      const dstIdx = (dy * aw + dx) * 4;
+      const luma = Math.round(
+        0.299 * roiData.data[srcIdx]
+        + 0.587 * roiData.data[srcIdx + 1]
+        + 0.114 * roiData.data[srcIdx + 2]
+      );
+      pixelData[dstIdx] = pixelData[dstIdx + 1] = pixelData[dstIdx + 2] = luma;
+      pixelData[dstIdx + 3] = 255;
+    }
+  }
+  return new ImageData(pixelData, aw, ah);
+}
+
 function _estimateCellSize(dots) {
   if (dots.length < 2) return { cellW: 30, cellH: 45 };
 
@@ -719,12 +1039,15 @@ function _estimateCellSize(dots) {
   for (let i = 1; i < sorted.length; i++) {
     const dx = sorted[i].x - sorted[i - 1].x;
     const dy = Math.abs(sorted[i].y - sorted[i - 1].y);
-    if (dx > 2 && dx < 200) xDeltas.push(dx);
-    if (dy > 2 && dy < 200) yDeltas.push(dy);
+    if (dx > 8 && dx < 160) xDeltas.push(dx);
+    if (dy > 8 && dy < 160) yDeltas.push(dy);
   }
 
-  const medX = _median(xDeltas) || 18;
-  const medY = _median(yDeltas) || 14;
+  const medRadius = _median(dots.map(d => d.radius).filter(r => r > 0)) || 8;
+  const robustX = xDeltas.filter(v => v >= medRadius * 1.2 && v <= medRadius * 8);
+  const robustY = yDeltas.filter(v => v >= medRadius * 1.2 && v <= medRadius * 8);
+  const medX = _median(robustX.length ? robustX : xDeltas) || Math.max(18, medRadius * 2.6);
+  const medY = _median(robustY.length ? robustY : yDeltas) || Math.max(14, medRadius * 2.1);
   return {
     cellW: Math.max(12, Math.min(120, medX * 2.2)),
     cellH: Math.max(18, Math.min(180, medY * 2.6)),
