@@ -828,9 +828,58 @@ export function matchCellsByDotPattern(cellRegions) {
       colMidX = Math.max(...dedupedDots.map(d => d.x)) + 1;
     }
 
-    // ── Step 3: Build 6-bit pattern — rowIdx from yGroups, col from X vs midX ─
+    // ── Step 3: Assign absolute row indices (0=top, 1=mid, 2=bot) ─────────────
+    // Sequential group indices (0,1,…) are WRONG when dots skip a Braille row.
+    // Example: 'k' (dots 1,3 = top+bot) gives 2 yGroups; sequential indices 0+1
+    // produce bit-pattern 0b000011 = 'b', not 0b000101 = 'k'.  The same confusion
+    // affects: h↔u (dots 1,2,5 vs 1,3,6), g↔x (dots 1,2,4,5 vs 1,3,4,6),
+    // f↔m (dots 1,2,4 vs 1,3,4) and any other pair whose column dot positions
+    // are adjacent (rows 0+1) vs separated by a gap (rows 0+2).
+    // We resolve absolute positions from Y-gap analysis relative to expectedRowSpacing
+    // and from each group's position within the cell's bounding box.
+    const expectedRowSpacing = cell.h > 0 ? cell.h / 3.0 : Y_THRESH;
+    const _absRowFrom = (g) => {
+      // Position of group's meanY within the cell's bounding box as a fraction.
+      if (cell.h <= 0) return 0;
+      const rel = (g.meanY - cell.y) / cell.h;
+      return rel < 0.38 ? 0 : rel < 0.72 ? 1 : 2;
+    };
+    let absoluteRowIndices;
+    if (yGroups.length === 0) {
+      absoluteRowIndices = [];
+    } else if (yGroups.length === 1) {
+      absoluteRowIndices = [_absRowFrom(yGroups[0])];
+    } else if (yGroups.length === 2) {
+      const gap = yGroups[1].meanY - yGroups[0].meanY;
+      if (gap > 1.5 * expectedRowSpacing) {
+        // Gap spans ~2 row-spacings → dots are in the TOP and BOTTOM rows,
+        // skipping the middle row.  Covers k(1,3), u(1,3,6), x(1,3,4,6),
+        // and all other patterns whose left or right column has a top+bot pair.
+        const base = _absRowFrom(yGroups[0]);
+        absoluteRowIndices = [base, Math.min(2, base + 2)];
+      } else {
+        // Adjacent rows (gap ≈ 1× spacing).  Use cell.y to decide 0+1 vs 1+2.
+        absoluteRowIndices = yGroups.map(_absRowFrom);
+        if (absoluteRowIndices[0] === absoluteRowIndices[1]) {
+          // Fallback: if cell.y is imprecise ensure distinct, increasing indices.
+          absoluteRowIndices[1] = Math.min(2, absoluteRowIndices[0] + 1);
+        }
+      }
+    } else {
+      // 3 yGroups → map each to its absolute row position.
+      absoluteRowIndices = yGroups.map(_absRowFrom);
+      // Ensure strictly increasing indices within [0, 2].
+      for (let i = 1; i < absoluteRowIndices.length; i++) {
+        if (absoluteRowIndices[i] <= absoluteRowIndices[i - 1]) {
+          absoluteRowIndices[i] = Math.min(2, absoluteRowIndices[i - 1] + 1);
+        }
+      }
+    }
+
+    // ── Step 4: Build 6-bit pattern — rowIdx from absoluteRowIndices, col from X ─
     let pattern = 0;
-    yGroups.slice(0, 3).forEach((g, rowIdx) => {
+    yGroups.slice(0, 3).forEach((g, gi) => {
+      const rowIdx = absoluteRowIndices[gi] ?? gi;  // fallback to sequential if needed
       for (const d of g.pts) {
         const colOffset = d.x < colMidX ? 0 : 3;  // left col = bits 0-2, right = 3-5
         pattern |= (1 << (colOffset + rowIdx));
@@ -852,7 +901,7 @@ export function matchCellsByDotPattern(cellRegions) {
     console.log(
       `[DotPattern] r${cell.rowIndex}c${cell.colIndex}: ${dedupedDots.length} dots,`,
       `L=${leftDots.length} R=${rightDots.length}, gap=${bestGap.toFixed(1)},`,
-      `yGroups=${yGroups.length}, colMid=${colMidX.toFixed(0)}, pattern=${binStr} → '${bestChar}'`
+      `yGroups=${yGroups.length}(rows:${absoluteRowIndices}), colMid=${colMidX.toFixed(0)}, pattern=${binStr} → '${bestChar}'`
     );
 
     const dotCount = dedupedDots.length;

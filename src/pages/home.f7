@@ -247,6 +247,7 @@ import {
 } from '../js/detection/simple-braille-detector.js';
 import { processDetectionResult, isLikelyGibberishText } from '../js/recognition/pattern-matcher.js';
 import { CHAR_DOT_PATTERNS } from '../js/utils/braille-mappings.js';
+import { speakTTS, stopTTS } from '../js/utils/tts.js';
 import sampleImageSrc from '../assets/sample.jpeg';
 
 export default (props, { $f7, $store, $update, $on, $onMounted }) => {
@@ -757,75 +758,12 @@ export default (props, { $f7, $store, $update, $on, $onMounted }) => {
     $update();
   }
 
-  // Retained reference prevents GC on Android before speech starts
-  let _ttsUtterance    = null;
-  let _ttsResumeTimer  = null;
-
-  /**
-   * Speak text using the Web Speech API.
-   * Includes Android WebView workarounds:
-   *  - Retain utterance reference to prevent GC
-   *  - Wait for voices via onvoiceschanged if not yet loaded
-   *  - Periodic resume() to prevent Android WebView 14 s pause bug
-   *  - Small settle delay after cancel() before speak()
-   */
   function speakText(text) {
     if (!text) return;
-    if (!('speechSynthesis' in window)) {
-      $f7.toast.show({ text: 'Text-to-speech not supported on this device', closeTimeout: 2500 });
-      return;
-    }
     if (!($store.getters.settings?.textToSpeechEnabled ?? true)) return;
-
-    // Clear any running resume-interval
-    if (_ttsResumeTimer) { clearInterval(_ttsResumeTimer); _ttsResumeTimer = null; }
-    window.speechSynthesis.cancel();
-
-    const _doSpeak = () => {
-      _ttsUtterance = new SpeechSynthesisUtterance(text);
-      _ttsUtterance.rate   = 0.9;
-      _ttsUtterance.pitch  = 1.0;
-      _ttsUtterance.volume = 1.0;
-      // Prefer a local English voice to avoid a network requirement
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) {
-        const local = voices.find(v => v.localService && v.lang.startsWith('en'))
-                   || voices.find(v => v.lang.startsWith('en'))
-                   || voices[0];
-        if (local) _ttsUtterance.voice = local;
-      }
-      _ttsUtterance.onend = _ttsUtterance.onerror = () => {
-        if (_ttsResumeTimer) { clearInterval(_ttsResumeTimer); _ttsResumeTimer = null; }
-        _ttsUtterance = null;
-      };
-      // Android WebView pauses synthesis after ~14 s — keep it alive
-      _ttsResumeTimer = setInterval(() => {
-        if (window.speechSynthesis.speaking && window.speechSynthesis.paused) {
-          window.speechSynthesis.resume();
-        } else if (!window.speechSynthesis.speaking) {
-          clearInterval(_ttsResumeTimer); _ttsResumeTimer = null;
-        }
-      }, 5000);
-      window.speechSynthesis.speak(_ttsUtterance);
-    };
-
-    // Settle delay after cancel() — required on some Android versions
-    setTimeout(() => {
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) {
-        _doSpeak();
-      } else {
-        // Voices not loaded yet — wait for the event (with a fallback)
-        const _onVoices = () => {
-          window.speechSynthesis.onvoiceschanged = null;
-          _doSpeak();
-        };
-        window.speechSynthesis.onvoiceschanged = _onVoices;
-        setTimeout(() => {
-          if (!_ttsUtterance) { window.speechSynthesis.onvoiceschanged = null; _doSpeak(); }
-        }, 800);
-      }
-    }, 150);
+    speakTTS(text).catch(() => {
+      $f7.toast.show({ text: 'Text-to-speech not available on this device', closeTimeout: 2500 });
+    });
   }
 
   function copyText(text) {

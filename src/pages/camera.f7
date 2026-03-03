@@ -110,6 +110,7 @@ import {
 } from '../js/detection/simple-braille-detector.js';
 import { findConsistentResult, processDetectionResult } from '../js/recognition/pattern-matcher.js';
 import { throttle } from '../js/utils/throttle.js';
+import { speakTTS, stopTTS } from '../js/utils/tts.js';
 
 export default (props, { $f7, $store, $update, $on, $el }) => {
 
@@ -486,10 +487,16 @@ export default (props, { $f7, $store, $update, $on, $el }) => {
   function showDetectionAlert(text) {
     if (activeDetectionDialog) return;
     isDetectionPaused = true;
+    // Auto-speak the detected text when the dialog opens
+    _doTTS(text);
     activeDetectionDialog = $f7.dialog.create({
       title: 'Braille Detected',
       text,
       buttons: [
+        {
+          text: 'Speak',
+          onClick: () => { _doTTS(text); },
+        },
         {
           text: 'Copy',
           bold: true,
@@ -557,66 +564,10 @@ export default (props, { $f7, $store, $update, $on, $el }) => {
     $update();
   }
 
-  // Retained reference prevents GC on Android before speech starts
-  let _ttsUtterance   = null;
-  let _ttsResumeTimer = null;
-
-  /**
-   * Speak text using the Web Speech API.
-   * Includes Android WebView workarounds:
-   *  - Retain utterance reference to prevent GC
-   *  - Wait for voices via onvoiceschanged if not yet loaded
-   *  - Periodic resume() to prevent Android WebView 14 s pause bug
-   *  - Small settle delay after cancel() before speak()
-   */
   function _doTTS(text) {
     if (!text) return;
-    if (!('speechSynthesis' in window)) return;
     if (!($store.getters.settings?.textToSpeechEnabled ?? true)) return;
-
-    if (_ttsResumeTimer) { clearInterval(_ttsResumeTimer); _ttsResumeTimer = null; }
-    window.speechSynthesis.cancel();
-
-    const _doSpeak = () => {
-      _ttsUtterance = new SpeechSynthesisUtterance(text);
-      _ttsUtterance.rate   = 0.9;
-      _ttsUtterance.pitch  = 1.0;
-      _ttsUtterance.volume = 1.0;
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) {
-        const local = voices.find(v => v.localService && v.lang.startsWith('en'))
-                   || voices.find(v => v.lang.startsWith('en'))
-                   || voices[0];
-        if (local) _ttsUtterance.voice = local;
-      }
-      _ttsUtterance.onend = _ttsUtterance.onerror = () => {
-        if (_ttsResumeTimer) { clearInterval(_ttsResumeTimer); _ttsResumeTimer = null; }
-        _ttsUtterance = null;
-      };
-      _ttsResumeTimer = setInterval(() => {
-        if (window.speechSynthesis.speaking && window.speechSynthesis.paused) {
-          window.speechSynthesis.resume();
-        } else if (!window.speechSynthesis.speaking) {
-          clearInterval(_ttsResumeTimer); _ttsResumeTimer = null;
-        }
-      }, 5000);
-      window.speechSynthesis.speak(_ttsUtterance);
-    };
-
-    setTimeout(() => {
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) {
-        _doSpeak();
-      } else {
-        window.speechSynthesis.onvoiceschanged = () => {
-          window.speechSynthesis.onvoiceschanged = null;
-          _doSpeak();
-        };
-        setTimeout(() => {
-          if (!_ttsUtterance) { window.speechSynthesis.onvoiceschanged = null; _doSpeak(); }
-        }, 800);
-      }
-    }, 150);
+    speakTTS(text).catch(err => console.warn('[Camera] TTS error:', err));
   }
 
   function speakDetected() {
@@ -639,8 +590,7 @@ export default (props, { $f7, $store, $update, $on, $el }) => {
 
   $on('pageBeforeRemove', () => {
     if (processingInterval) clearInterval(processingInterval);
-    if (_ttsResumeTimer)    { clearInterval(_ttsResumeTimer); _ttsResumeTimer = null; }
-    if (_ttsUtterance)      { window.speechSynthesis.cancel(); _ttsUtterance = null; }
+    stopTTS();
     if (stream) stream.getTracks().forEach(t => t.stop());
     if (videoEl) { videoEl.srcObject = null; }
     $store.dispatch('setCameraActive', false);
