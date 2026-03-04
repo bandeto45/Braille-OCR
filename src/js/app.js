@@ -19,6 +19,18 @@ import store from './store.js';
 import App from '../app.f7';
 
 var device = getDevice();
+
+// Apply saved dark mode before app initialization
+if (store.state.darkMode) {
+  document.documentElement.classList.add('theme-dark');
+} else {
+  document.documentElement.classList.remove('theme-dark');
+}
+
+// Apply saved font size before app initialization
+const savedFontSize = store.state.textSize || 16;
+document.documentElement.style.setProperty('--user-text-size', `${savedFontSize}px`);
+
 var app = new Framework7({
   name: 'Braille', // App name
   theme: 'auto', // Automatic theme detection

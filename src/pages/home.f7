@@ -147,6 +147,84 @@
         </div>
       `}
 
+      <!-- Quick Settings -->
+      <div class="block">
+        <div class="settings-collapsible" @click=${toggleSettings}>
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <i class="icon material-icons" style="color:var(--braille-primary);font-size:20px;">settings</i>
+              <span class="text-sm font-semibold color-secondary" style="text-transform:uppercase;letter-spacing:0.08em;">Quick Settings</span>
+            </div>
+            <i class="icon material-icons" style="color:#999;font-size:20px;transition:transform 0.3s;transform:rotate(${settingsExpanded ? '180deg' : '0deg'});">
+              expand_more
+            </i>
+          </div>
+        </div>
+
+        ${settingsExpanded && $h`
+          <div class="settings-panel">
+            <!-- Theme Selection -->
+            <div class="settings-item">
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-sm font-medium color-secondary">Theme</span>
+                <span class="text-xs" style="color:#999;">${currentTheme === 'dark' ? 'Dark Mode' : 'Light Mode'}</span>
+              </div>
+              <div class="theme-toggle-buttons">
+                <button 
+                  class="theme-btn ${currentTheme === 'light' ? 'active' : ''}"
+                  @click=${() => setTheme('light')}
+                >
+                  <i class="icon material-icons">light_mode</i>
+                  <span>Light</span>
+                </button>
+                <button 
+                  class="theme-btn ${currentTheme === 'dark' ? 'active' : ''}"
+                  @click=${() => setTheme('dark')}
+                >
+                  <i class="icon material-icons">dark_mode</i>
+                  <span>Dark</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Font Size Selection -->
+            <div class="settings-item">
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-sm font-medium color-secondary">Font Size</span>
+                <span class="text-xs" style="color:#999;">${getFontSizeLabel()}</span>
+              </div>
+              <div class="font-size-buttons">
+                <button 
+                  class="font-size-btn ${fontSize === 16 ? 'active' : ''}"
+                  @click=${() => setFontSize(16)}
+                >
+                  <span style="font-size:14px;">Aa</span>
+                  <span style="font-size:11px;">Default</span>
+                </button>
+                <button 
+                  class="font-size-btn ${fontSize === 20 ? 'active' : ''}"
+                  @click=${() => setFontSize(20)}
+                >
+                  <span style="font-size:18px;">Aa</span>
+                  <span style="font-size:11px;">Medium</span>
+                </button>
+                <button 
+                  class="font-size-btn ${fontSize === 24 ? 'active' : ''}"
+                  @click=${() => setFontSize(24)}
+                >
+                  <span style="font-size:22px;">Aa</span>
+                  <span style="font-size:11px;">Large</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="text-xs text-center mt-3" style="color:#999;">
+              Settings are saved automatically
+            </div>
+          </div>
+        `}
+      </div>
+
       <!-- Feature cards -->
       <div class="block">
         <div class="text-sm font-semibold color-secondary mb-3" style="text-transform:uppercase;letter-spacing:0.08em;">Features</div>
@@ -254,6 +332,11 @@ export default (props, { $f7, $store, $update, $on, $onMounted }) => {
   let uploadResult  = null;
   let uploadError   = null;
   let isProcessing  = false;
+
+  // ── Quick Settings state ───────────────────────────────────────────────
+  let settingsExpanded = false;
+  let currentTheme = $store.getters.darkMode ? 'dark' : 'light';
+  let fontSize = $store.getters.settings?.textSize ?? 16;
 
   // ── Crop state ─────────────────────────────────────────────────────────
   let cropActive  = false;
@@ -391,7 +474,54 @@ export default (props, { $f7, $store, $update, $on, $onMounted }) => {
 
   $onMounted(() => {
     checkPermissions();
+    // Sync currentTheme with store
+    currentTheme = $store.getters.darkMode ? 'dark' : 'light';
+    // Apply saved theme on mount
+    if ($store.getters.darkMode) {
+      document.documentElement.classList.add('theme-dark');
+    } else {
+      document.documentElement.classList.remove('theme-dark');
+    }
+    // Apply saved font size
+    applyFontSize();
   });
+
+  // ── Quick Settings functions ───────────────────────────────────────────
+  function toggleSettings() {
+    settingsExpanded = !settingsExpanded;
+    $update();
+  }
+
+  function setTheme(theme) {
+    currentTheme = theme;
+    const isDark = (theme === 'dark');
+    $store.dispatch('setDarkMode', isDark);
+    $update();
+  }
+
+  function setFontSize(size) {
+    fontSize = size;
+    $store.dispatch('updateSettings', { textSize: size });
+    // Apply immediately to root element
+    document.documentElement.style.setProperty('--user-text-size', `${size}px`);
+    console.log(`[Home] Font size set to: ${size}px`, document.documentElement.style.getPropertyValue('--user-text-size'));
+    // Force component update
+    $update();
+  }
+
+  function getFontSizeLabel() {
+    if (fontSize === 16) return 'Default (16px)';
+    if (fontSize === 20) return 'Medium (20px)';
+    if (fontSize === 24) return 'Large (24px)';
+    return `${fontSize}px`;
+  }
+
+  function applyFontSize() {
+    // Apply font size to detected text and result cards
+    const size = $store.getters.settings?.textSize ?? fontSize;
+    const root = document.documentElement;
+    root.style.setProperty('--user-text-size', `${size}px`);
+  }
 
   // ── Crop functions ───────────────────────────────────────────────────
 

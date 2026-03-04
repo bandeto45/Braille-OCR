@@ -1,6 +1,6 @@
 <template>
   <div class="page no-navbar no-toolbar preloader-page" data-name="preloader">
-    <div class="page-content" style="background: var(--braille-secondary); display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%;">
+    <div class="page-content">
       <div class="splash-icon">
         <i class="icon material-icons">visibility</i>
       </div>
